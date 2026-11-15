@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,14 +159,17 @@ func (c *streamConn) Close() error {
 }
 
 type session struct {
-	id       string
-	userID   string
-	tokenID  string
-	instance string
-	remote   string
-	mux      *yamux.Session
-	tunnels  map[string]*Tunnel // guarded by Hub.mu
-	done     chan struct{}
+	id        string
+	userID    string
+	tokenID   string
+	instance  string
+	remote    string
+	client    string // real client address (behind the TLS edge)
+	version   string // agent version reported at connect
+	connected time.Time
+	mux       *yamux.Session
+	tunnels   map[string]*Tunnel // guarded by Hub.mu
+	done      chan struct{}
 }
 
 // Stats is a point-in-time summary.
@@ -222,6 +226,83 @@ func (h *Hub) Stats() Stats {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return Stats{Sessions: len(h.sessions), Tunnels: len(h.byID)}
+}
+
+// TunnelInfo is a read-only view of a live tunnel.
+type TunnelInfo struct {
+	ID          string    `json:"id"`
+	Proto       string    `json:"proto"`
+	Hostname    string    `json:"hostname,omitempty"`
+	Port        int       `json:"port,omitempty"`
+	PublicURL   string    `json:"public_url"`
+	CreatedAt   time.Time `json:"created_at"`
+	ActiveConns int       `json:"active_connections"`
+}
+
+// SessionInfo is a read-only view of a connected agent.
+type SessionInfo struct {
+	ID           string       `json:"id"`
+	UserID       string       `json:"user_id"`
+	TokenID      string       `json:"token_id"`
+	Client       string       `json:"client"`
+	AgentVersion string       `json:"agent_version,omitempty"`
+	ConnectedAt  time.Time    `json:"connected_at"`
+	Tunnels      []TunnelInfo `json:"tunnels"`
+}
+
+// Sessions returns a snapshot of every connected agent and its tunnels,
+// oldest connection first.
+func (h *Hub) Sessions() []SessionInfo {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]SessionInfo, 0, len(h.sessions))
+	for _, s := range h.sessions {
+		si := SessionInfo{
+			ID: s.id, UserID: s.userID, TokenID: s.tokenID, Client: s.client,
+			AgentVersion: s.version, ConnectedAt: s.connected, Tunnels: []TunnelInfo{},
+		}
+		for _, t := range s.tunnels {
+			si.Tunnels = append(si.Tunnels, TunnelInfo{
+				ID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port,
+				PublicURL: t.PublicURL, CreatedAt: t.CreatedAt, ActiveConns: len(t.sem),
+			})
+		}
+		sort.Slice(si.Tunnels, func(i, j int) bool { return si.Tunnels[i].CreatedAt.Before(si.Tunnels[j].CreatedAt) })
+		out = append(out, si)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ConnectedAt.Before(out[j].ConnectedAt) })
+	return out
+}
+
+// Disconnect closes the agent session with the given ID. Its tunnels are
+// removed and their hostnames released as for any other disconnect; the
+// agent will try to reconnect unless its token has been revoked.
+func (h *Hub) Disconnect(sessionID string) bool {
+	h.mu.RLock()
+	s := h.sessions[sessionID]
+	h.mu.RUnlock()
+	if s == nil {
+		return false
+	}
+	s.mux.Close()
+	return true
+}
+
+// DisconnectToken closes every session authenticated with tokenID (used
+// right after the token is revoked) and returns how many were closed.
+func (h *Hub) DisconnectToken(tokenID string) int {
+	h.mu.RLock()
+	var hit []*session
+	for _, s := range h.sessions {
+		if s.tokenID == tokenID {
+			hit = append(hit, s)
+		}
+	}
+	h.mu.RUnlock()
+	for _, s := range hit {
+		s.mux.Close()
+	}
+	return len(hit)
 }
 
 // Shutdown closes every session and waits for clean-up (hostname release).
@@ -375,7 +456,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	s := &session{
 		id: randomID(8), userID: principal.UserID, tokenID: principal.TokenID, instance: instance,
-		remote: r.RemoteAddr, mux: mux, tunnels: map[string]*Tunnel{}, done: make(chan struct{}),
+		remote: r.RemoteAddr, client: client, version: r.Header.Get(protocol.HeaderAgentVersion),
+		connected: time.Now(), mux: mux, tunnels: map[string]*Tunnel{}, done: make(chan struct{}),
 	}
 	h.mu.Lock()
 	if h.closing {
