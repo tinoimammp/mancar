@@ -5,7 +5,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 `mancard` gateway for Linux, and the Docker images
 `ghcr.io/tinoimammp/mancar` and `ghcr.io/tinoimammp/mancar-edge`.
 
-## [Unreleased]
+## [v0.3.2] - 2026-11-15
 
 ### Added
 - `mancar http PORT` now offers the three subdomains you used most recently
@@ -121,6 +121,7 @@ First release.
   rate limiting.
 - Built with Go 1.26.11.
 
+[v0.3.2]: https://github.com/tinoimammp/mancar/compare/v0.3.1...v0.3.2
 [v0.3.1]: https://github.com/tinoimammp/mancar/compare/v0.3.0...v0.3.1
 [v0.3.0]: https://github.com/tinoimammp/mancar/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/tinoimammp/mancar/compare/v0.1.0...v0.2.0
