@@ -5,6 +5,22 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 `mancard` gateway for Linux, and the Docker images
 `ghcr.io/tinoimammp/mancar` and `ghcr.io/tinoimammp/mancar-edge`.
 
+## [Unreleased]
+
+### Added
+- `mancar http PORT` now offers the three subdomains you used most recently
+  with that server, so a name does not have to be typed again:
+  ```text
+    1) Random subdomain
+    2) Custom subdomain
+
+    Recently used:
+    3) my-api                   (used 2h ago)
+    4) shop                     (used 3 days ago)
+  ```
+  `--last` reuses the most recent one without asking. The history is kept on
+  your machine only (`recent-subdomains.json` in the mancar state directory).
+
 ## [v0.3.1] - 2026-11-15
 
 ### Changed

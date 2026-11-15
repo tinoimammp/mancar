@@ -174,7 +174,8 @@ mancar config set token -     # paste the token, press Enter, then Ctrl+D
 ```bash
 mancar http 3000 --subdomain my-api   # https://my-api.YOUR_DOMAIN -> localhost:3000
 mancar http 3000 --random             # random name, e.g. blue-falcon
-mancar http 3000                      # asks which one you want
+mancar http 3000                      # asks: random, custom, or one of your last 3 names
+mancar http 3000 --last               # reuse the name you used most recently
 mancar tcp 5432                       # raw TCP, e.g. a database -> YOUR_DOMAIN:200xx
 ```
 
