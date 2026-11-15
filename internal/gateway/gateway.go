@@ -142,6 +142,20 @@ func (t *Tunnel) OpenStream(remoteAddr string) (net.Conn, error) {
 	return &streamConn{Stream: st, release: release}, nil
 }
 
+// Notify reports a finished exchange to the owning agent's request log. It
+// never blocks: events are dropped when the agent cannot keep up or does not
+// support them.
+func (t *Tunnel) Notify(ev *protocol.Event) {
+	if t.sess == nil || t.sess.events == nil {
+		return
+	}
+	ev.TunnelID = t.ID
+	select {
+	case t.sess.events <- ev:
+	default:
+	}
+}
+
 // streamConn releases the tunnel's connection slot exactly once on Close.
 type streamConn struct {
 	*yamux.Stream
@@ -170,6 +184,9 @@ type session struct {
 	mux       *yamux.Session
 	tunnels   map[string]*Tunnel // guarded by Hub.mu
 	done      chan struct{}
+	// events feeds the agent's request log; nil when the agent did not
+	// announce protocol.FeatureEvents.
+	events chan *protocol.Event
 }
 
 // Stats is a point-in-time summary.
@@ -459,6 +476,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		remote: r.RemoteAddr, client: client, version: r.Header.Get(protocol.HeaderAgentVersion),
 		connected: time.Now(), mux: mux, tunnels: map[string]*Tunnel{}, done: make(chan struct{}),
 	}
+	if headerHasToken(r.Header, protocol.HeaderFeatures, protocol.FeatureEvents) {
+		s.events = make(chan *protocol.Event, 256)
+	}
 	h.mu.Lock()
 	if h.closing {
 		h.mu.Unlock()
@@ -483,6 +503,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Hub) run(s *session) {
 	defer h.cleanup(s)
+	if s.events != nil {
+		go h.sendEvents(s)
+	}
 
 	// The agent must open the control stream promptly.
 	type res struct {
@@ -512,6 +535,42 @@ func (h *Hub) run(s *session) {
 		reply.ReqID = msg.ReqID
 		_ = ctrl.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		if err := protocol.WriteJSONLine(ctrl, reply); err != nil {
+			return
+		}
+	}
+}
+
+// sendEvents writes events to one stream opened on the first event. A write
+// failure ends it; the request log is best effort and never affects traffic.
+func (h *Hub) sendEvents(s *session) {
+	var st net.Conn
+	defer func() {
+		if st != nil {
+			st.Close()
+		}
+	}()
+	for {
+		var ev *protocol.Event
+		select {
+		case ev = <-s.events:
+		case <-s.done:
+			return
+		}
+		if st == nil {
+			// Assign only on success: a nil *yamux.Stream stored in the
+			// interface would make the deferred Close panic.
+			opened, err := s.mux.OpenStream()
+			if err != nil {
+				return
+			}
+			st = opened
+			_ = st.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if protocol.WriteJSONLine(st, protocol.StreamHeader{Kind: protocol.StreamKindEvents}) != nil {
+				return
+			}
+		}
+		_ = st.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if protocol.WriteJSONLine(st, ev) != nil {
 			return
 		}
 	}
@@ -637,12 +696,15 @@ func (h *Hub) acceptTCP(t *Tunnel) {
 			return
 		}
 		go func() {
+			start := time.Now()
 			st, err := t.OpenStream(c.RemoteAddr().String())
 			if err != nil {
 				c.Close()
 				return
 			}
-			netutil.Pipe(c, st)
+			in, out := netutil.Pipe(c, st)
+			t.Notify(&protocol.Event{Time: start, DurationMs: time.Since(start).Milliseconds(),
+				BytesIn: in, BytesOut: out, Remote: c.RemoteAddr().String()})
 		}()
 	}
 }
