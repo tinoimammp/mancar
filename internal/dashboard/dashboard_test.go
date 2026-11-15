@@ -12,6 +12,7 @@ import (
 	"github.com/tinoimammp/mancar/internal/dashboard"
 	"github.com/tinoimammp/mancar/internal/gateway"
 	"github.com/tinoimammp/mancar/internal/store/postgres"
+	"github.com/tinoimammp/mancar/internal/usage"
 )
 
 // fakeStore is an in-memory dashboard.Store.
@@ -20,6 +21,7 @@ type fakeStore struct {
 	users   []postgres.UserInfo
 	tokens  []postgres.TokenInfo
 	domains []postgres.DomainInfo
+	usage   map[string]postgres.UsageWindows
 }
 
 func (f *fakeStore) AdminByUsername(_ context.Context, u string) (postgres.Admin, error) {
@@ -79,6 +81,14 @@ func (f *fakeStore) ListDomains(context.Context) ([]postgres.DomainInfo, error) 
 }
 
 func (f *fakeStore) ReleaseDomain(context.Context, string) error { return postgres.ErrNotFound }
+
+func (f *fakeStore) UsageByHost(context.Context) (map[string]postgres.UsageWindows, error) {
+	return f.usage, nil
+}
+
+func (f *fakeStore) UsageByUser(context.Context) (map[string]postgres.UsageWindows, error) {
+	return nil, nil
+}
 
 type fakeHub struct{ disconnectedTokens []string }
 
@@ -307,5 +317,31 @@ func TestDisabledWithoutStore(t *testing.T) {
 	}
 	if rec := do(d, req{method: "GET", path: "/dashboard/"}); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("page without store: %d", rec.Code)
+	}
+}
+
+func TestOverviewShowsTraffic(t *testing.T) {
+	d, st, _ := setup(t)
+	st.usage = map[string]postgres.UsageWindows{
+		"a.tunnel.example.com": {Day: usage.Totals{Requests: 7, Errors: 2}, Week: usage.Totals{Requests: 70}},
+		"b.tunnel.example.com": {Day: usage.Totals{Requests: 30}},
+		"idle.example.com":     {Week: usage.Totals{Requests: 5}},
+	}
+	c := login(t, d)
+	rec := do(d, req{method: "GET", path: "/api/v1/admin/overview", cookie: c})
+	var o struct {
+		Traffic  usage.Totals `json:"traffic_24h"`
+		TopHosts []struct {
+			Hostname string `json:"hostname"`
+		} `json:"top_hosts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &o); err != nil || rec.Code != 200 {
+		t.Fatalf("overview: %d %s", rec.Code, rec.Body)
+	}
+	if o.Traffic.Requests != 37 || o.Traffic.Errors != 2 {
+		t.Errorf("24h totals: %+v", o.Traffic)
+	}
+	if len(o.TopHosts) != 2 || o.TopHosts[0].Hostname != "b.tunnel.example.com" {
+		t.Errorf("top hosts (busiest first, idle ones left out): %+v", o.TopHosts)
 	}
 }

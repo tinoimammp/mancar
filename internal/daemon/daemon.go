@@ -162,7 +162,7 @@ func cmdServe(ctx context.Context, e Env, cfg *config.Config, log *slog.Logger) 
 			log.Error("database migration failed", "err", err)
 			return 1
 		}
-		deps.Auth, deps.Registry, deps.HealthCheck, deps.Admin = st, st, st.Ping, st
+		deps.Auth, deps.Registry, deps.HealthCheck, deps.Admin, deps.Captures, deps.Usage = st, st, st.Ping, st, st, st
 	case "memory":
 		mem := auth.NewMemory()
 		token := cfg.DevAgentToken

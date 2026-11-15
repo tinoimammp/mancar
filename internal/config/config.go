@@ -32,9 +32,8 @@ type Config struct {
 	DatabaseURL   string
 	DevAgentToken string
 
-	// JWTSecret keys the dashboard session cookies. EncryptionKey is
-	// validated now so the deployment contract is stable; no feature uses
-	// it yet (see docs/STATUS.md).
+	// JWTSecret keys the dashboard session cookies. EncryptionKey encrypts
+	// captured requests (request inspector).
 	JWTSecret     string
 	EncryptionKey []byte
 
@@ -49,6 +48,12 @@ type Config struct {
 	ResponseHeaderTimeout time.Duration
 	HoldCustom            time.Duration
 	HoldRandom            time.Duration
+
+	// Request inspector (needs PostgreSQL and ENCRYPTION_KEY).
+	Inspect          bool
+	InspectRetention time.Duration
+	InspectMaxBody   int
+	InspectMaxRows   int
 }
 
 // Error lists every configuration problem found.
@@ -205,6 +210,20 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.ResponseHeaderTimeout = getDur("RESPONSE_HEADER_TIMEOUT", "2m")
 	c.HoldCustom = getDur("HOSTNAME_HOLD_CUSTOM", "24h")
 	c.HoldRandom = getDur("HOSTNAME_HOLD_RANDOM", "5m")
+
+	switch v := strings.ToLower(get("INSPECT", "on")); v {
+	case "on", "true", "1":
+		c.Inspect = true
+	case "off", "false", "0":
+	default:
+		bad("INSPECT must be on or off (got %q)", v)
+	}
+	c.InspectRetention = getDur("INSPECT_RETENTION", "24h")
+	c.InspectMaxBody = getInt("INSPECT_MAX_BODY_BYTES", 64<<10, 0)
+	c.InspectMaxRows = getInt("INSPECT_MAX_ROWS", 50_000, 1)
+	if c.InspectMaxBody > 1<<20 {
+		bad("INSPECT_MAX_BODY_BYTES must be at most 1048576 (1 MiB)")
+	}
 
 	if len(problems) > 0 {
 		return nil, &Error{Problems: problems}

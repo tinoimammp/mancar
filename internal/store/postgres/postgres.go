@@ -16,6 +16,8 @@ import (
 
 	"github.com/tinoimammp/mancar/internal/auth"
 	"github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/inspect"
+	"github.com/tinoimammp/mancar/internal/usage"
 )
 
 // Store wraps a connection pool.
@@ -236,8 +238,14 @@ func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
 	return out, rows.Err()
 }
 
-// DeleteUser removes a user and, by cascade, their tokens and hostnames.
+// DeleteUser removes a user and, by cascade, their tokens and hostnames, and
+// deletes their captured requests and traffic statistics.
 func (s *Store) DeleteUser(ctx context.Context, id string) error {
+	for _, table := range []string{"captured_requests", "usage_hourly", "usage_daily", "usage_total"} {
+		if _, err := s.DB.ExecContext(ctx, `DELETE FROM `+table+` WHERE user_id::text = $1`, id); err != nil {
+			return err
+		}
+	}
 	res, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id::text = $1`, id)
 	if err != nil {
 		return err
@@ -372,6 +380,312 @@ func (s *Store) DeleteAdmin(ctx context.Context, username string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ---- request inspector --------------------------------------------------
+
+// InsertCaptures stores sealed captures in one statement.
+func (s *Store) InsertCaptures(ctx context.Context, rows []inspect.Row) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString(`INSERT INTO captured_requests (id, user_id, hostname, status, duration_ms,
+		request_bytes, response_bytes, created_at, nonce, ciphertext) VALUES `)
+	args := make([]any, 0, len(rows)*10)
+	for i, r := range rows {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		n := i * 10
+		fmt.Fprintf(&b, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", n+1, n+2, n+3, n+4, n+5, n+6, n+7, n+8, n+9, n+10)
+		var uid any
+		if r.UserID != "" {
+			uid = r.UserID
+		}
+		args = append(args, r.ID, uid, r.Hostname, r.Status, r.DurationMs, r.ReqSize, r.RespSize, r.CreatedAt, r.Nonce, r.Ciphertext)
+	}
+	b.WriteString(` ON CONFLICT DO NOTHING`)
+	_, err := s.DB.ExecContext(ctx, b.String(), args...)
+	return err
+}
+
+const captureCols = `id, coalesce(user_id::text, ''), hostname, status, duration_ms, request_bytes, response_bytes, created_at, nonce, ciphertext`
+
+func scanCapture(row interface{ Scan(...any) error }) (inspect.Row, error) {
+	var r inspect.Row
+	err := row.Scan(&r.ID, &r.UserID, &r.Hostname, &r.Status, &r.DurationMs, &r.ReqSize, &r.RespSize, &r.CreatedAt, &r.Nonce, &r.Ciphertext)
+	if errors.Is(err, sql.ErrNoRows) {
+		return inspect.Row{}, ErrNotFound
+	}
+	return r, err
+}
+
+// ListCaptures returns captures newest first.
+func (s *Store) ListCaptures(ctx context.Context, f inspect.Filter) ([]inspect.Row, error) {
+	if f.Limit <= 0 || f.Limit > 500 {
+		f.Limit = 100
+	}
+	before := f.Before
+	if before.IsZero() {
+		before = time.Now().Add(time.Hour)
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+captureCols+` FROM captured_requests
+		WHERE ($1 = '' OR hostname = $1) AND created_at < $2
+		ORDER BY created_at DESC LIMIT $3`, strings.ToLower(f.Hostname), before, f.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []inspect.Row
+	for rows.Next() {
+		r, err := scanCapture(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetCapture returns one capture.
+func (s *Store) GetCapture(ctx context.Context, id string) (inspect.Row, error) {
+	return scanCapture(s.DB.QueryRowContext(ctx, `SELECT `+captureCols+` FROM captured_requests WHERE id::text = $1`, id))
+}
+
+// DeleteCaptures deletes the captures of one hostname, or all when empty.
+func (s *Store) DeleteCaptures(ctx context.Context, hostname string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM captured_requests WHERE $1 = '' OR hostname = $1`, strings.ToLower(hostname))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// PurgeCaptures enforces retention: it deletes captures older than
+// olderThan and then everything beyond the newest keep rows.
+func (s *Store) PurgeCaptures(ctx context.Context, olderThan time.Time, keep int) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM captured_requests WHERE created_at < $1`, olderThan)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	res, err = s.DB.ExecContext(ctx, `DELETE FROM captured_requests WHERE created_at < (
+		SELECT created_at FROM captured_requests ORDER BY created_at DESC OFFSET $1 LIMIT 1)`, keep-1)
+	if err != nil {
+		return n, err
+	}
+	m, _ := res.RowsAffected()
+	return n + m, nil
+}
+
+// ---- traffic statistics -------------------------------------------------
+
+// upsertCounts adds counts to table in one statement. keyCols name the
+// conflict target and keys holds each row's key values; extra names further
+// columns ("first_seen,last_seen") whose values are in extraVals.
+func upsertCounts(ctx context.Context, tx *sql.Tx, table string, keyCols []string, extra string,
+	keys [][]any, counts []usage.Totals, extraVals [][]any) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	cols := append(append([]string{}, keyCols...), "requests", "errors", "bytes_in", "bytes_out")
+	if extra != "" {
+		cols = append(cols, strings.Split(extra, ",")...)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "INSERT INTO %s AS u (%s) VALUES ", table, strings.Join(cols, ", "))
+	args := make([]any, 0, len(keys)*len(cols))
+	for i := range keys {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString("(")
+		row := append(append([]any{}, keys[i]...), counts[i].Requests, counts[i].Errors, counts[i].BytesIn, counts[i].BytesOut)
+		if extraVals != nil {
+			row = append(row, extraVals[i]...)
+		}
+		for j, v := range row {
+			if j > 0 {
+				b.WriteString(",")
+			}
+			args = append(args, v)
+			fmt.Fprintf(&b, "$%d", len(args))
+		}
+		b.WriteString(")")
+	}
+	fmt.Fprintf(&b, ` ON CONFLICT (%s) DO UPDATE SET
+		requests = u.requests + EXCLUDED.requests, errors = u.errors + EXCLUDED.errors,
+		bytes_in = u.bytes_in + EXCLUDED.bytes_in, bytes_out = u.bytes_out + EXCLUDED.bytes_out`, strings.Join(keyCols, ", "))
+	if extra != "" {
+		b.WriteString(`, last_seen = greatest(u.last_seen, EXCLUDED.last_seen)`)
+	}
+	_, err := tx.ExecContext(ctx, b.String(), args...)
+	return err
+}
+
+func addTotals(dst *usage.Totals, r usage.Row) {
+	dst.Requests += r.Requests
+	dst.Errors += r.Errors
+	dst.BytesIn += r.BytesIn
+	dst.BytesOut += r.BytesOut
+}
+
+// AddUsage adds hourly counts to the hourly, daily and lifetime tables in
+// one transaction, so the three always agree.
+func (s *Store) AddUsage(ctx context.Context, rows []usage.Row) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	// One INSERT ... ON CONFLICT may not touch the same row twice, so rows
+	// are first combined per key of each table.
+	type hourKey struct {
+		host, user string
+		hour       time.Time
+	}
+	type dayKey struct{ host, user, day string }
+	type totalKey struct{ host, user string }
+	hours, days, totals := map[hourKey]*usage.Totals{}, map[dayKey]*usage.Totals{}, map[totalKey]*usage.Totals{}
+	first, last := map[totalKey]time.Time{}, map[totalKey]time.Time{}
+	var hourOrder []hourKey
+	var dayOrder []dayKey
+	var totalOrder []totalKey
+	for _, r := range rows {
+		hk := hourKey{r.Hostname, r.UserID, r.Hour.UTC()}
+		if hours[hk] == nil {
+			hours[hk] = &usage.Totals{}
+			hourOrder = append(hourOrder, hk)
+		}
+		addTotals(hours[hk], r)
+		dk := dayKey{r.Hostname, r.UserID, r.Hour.UTC().Format("2006-01-02")}
+		if days[dk] == nil {
+			days[dk] = &usage.Totals{}
+			dayOrder = append(dayOrder, dk)
+		}
+		addTotals(days[dk], r)
+		tk := totalKey{r.Hostname, r.UserID}
+		if totals[tk] == nil {
+			totals[tk] = &usage.Totals{}
+			totalOrder = append(totalOrder, tk)
+			first[tk], last[tk] = r.Hour, r.Hour
+		}
+		addTotals(totals[tk], r)
+		if r.Hour.Before(first[tk]) {
+			first[tk] = r.Hour
+		}
+		if r.Hour.After(last[tk]) {
+			last[tk] = r.Hour
+		}
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var keys [][]any
+	var counts []usage.Totals
+	for _, k := range hourOrder {
+		keys, counts = append(keys, []any{k.host, k.hour, k.user}), append(counts, *hours[k])
+	}
+	if err := upsertCounts(ctx, tx, "usage_hourly", []string{"hostname", "hour", "user_id"}, "", keys, counts, nil); err != nil {
+		return err
+	}
+	keys, counts = nil, nil
+	for _, k := range dayOrder {
+		keys, counts = append(keys, []any{k.host, k.day, k.user}), append(counts, *days[k])
+	}
+	if err := upsertCounts(ctx, tx, "usage_daily", []string{"hostname", "day", "user_id"}, "", keys, counts, nil); err != nil {
+		return err
+	}
+	keys, counts = nil, nil
+	var seen [][]any
+	for _, k := range totalOrder {
+		keys, counts = append(keys, []any{k.host, k.user}), append(counts, *totals[k])
+		seen = append(seen, []any{first[k], last[k]})
+	}
+	if err := upsertCounts(ctx, tx, "usage_total", []string{"hostname", "user_id"}, "first_seen,last_seen", keys, counts, seen); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// PurgeUsage deletes hourly counts older than before. Daily and lifetime
+// counts are kept forever.
+func (s *Store) PurgeUsage(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM usage_hourly WHERE hour < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// UsageWindows are the periods the dashboard shows.
+type UsageWindows struct {
+	Day   usage.Totals `json:"day"`
+	Week  usage.Totals `json:"week"`
+	Total usage.Totals `json:"total"` // since the hostname was first used
+}
+
+// usageBy sums the last 24 hours, the last 7 days and all time, grouped by
+// col (hostname or user_id).
+func (s *Store) usageBy(ctx context.Context, col string) (map[string]UsageWindows, error) {
+	out := map[string]UsageWindows{}
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT `+col+`::text,
+		       coalesce(sum(requests)  FILTER (WHERE hour >= now() - interval '24 hours'), 0),
+		       coalesce(sum(errors)    FILTER (WHERE hour >= now() - interval '24 hours'), 0),
+		       coalesce(sum(bytes_in)  FILTER (WHERE hour >= now() - interval '24 hours'), 0),
+		       coalesce(sum(bytes_out) FILTER (WHERE hour >= now() - interval '24 hours'), 0),
+		       sum(requests), sum(errors), sum(bytes_in), sum(bytes_out)
+		FROM usage_hourly WHERE hour >= now() - interval '7 days'
+		GROUP BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var k string
+		var w UsageWindows
+		if err := rows.Scan(&k, &w.Day.Requests, &w.Day.Errors, &w.Day.BytesIn, &w.Day.BytesOut,
+			&w.Week.Requests, &w.Week.Errors, &w.Week.BytesIn, &w.Week.BytesOut); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out[k] = w
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = s.DB.QueryContext(ctx, `SELECT `+col+`::text, sum(requests), sum(errors), sum(bytes_in), sum(bytes_out)
+		FROM usage_total GROUP BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var t usage.Totals
+		if err := rows.Scan(&k, &t.Requests, &t.Errors, &t.BytesIn, &t.BytesOut); err != nil {
+			return nil, err
+		}
+		w := out[k]
+		w.Total = t
+		out[k] = w
+	}
+	return out, rows.Err()
+}
+
+// UsageByHost returns 24-hour, 7-day and lifetime totals per hostname.
+func (s *Store) UsageByHost(ctx context.Context) (map[string]UsageWindows, error) {
+	return s.usageBy(ctx, "hostname")
+}
+
+// UsageByUser returns 24-hour, 7-day and lifetime totals per user ID.
+func (s *Store) UsageByUser(ctx context.Context) (map[string]UsageWindows, error) {
+	return s.usageBy(ctx, "user_id")
 }
 
 // ---- domain.Registry ---------------------------------------------------

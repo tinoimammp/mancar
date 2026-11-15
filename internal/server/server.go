@@ -18,9 +18,11 @@ import (
 	"github.com/tinoimammp/mancar/internal/dashboard"
 	"github.com/tinoimammp/mancar/internal/domain"
 	"github.com/tinoimammp/mancar/internal/gateway"
+	"github.com/tinoimammp/mancar/internal/inspect"
 	"github.com/tinoimammp/mancar/internal/netutil"
 	"github.com/tinoimammp/mancar/internal/protocol"
 	"github.com/tinoimammp/mancar/internal/router"
+	"github.com/tinoimammp/mancar/internal/usage"
 	"github.com/tinoimammp/mancar/internal/version"
 )
 
@@ -32,7 +34,11 @@ type Deps struct {
 	// HealthCheck verifies backing services (database); may be nil.
 	HealthCheck func(ctx context.Context) error
 	// Admin backs the web dashboard; nil disables it (in-memory mode).
-	Admin  dashboard.Store
+	Admin dashboard.Store
+	// Captures stores the request inspector's records; nil disables it.
+	Captures inspect.Store
+	// Usage stores traffic statistics; nil disables them.
+	Usage  usage.Store
 	Logger *slog.Logger
 	// TCPBindHost overrides the TCP tunnel bind address (tests use 127.0.0.1).
 	TCPBindHost string
@@ -42,11 +48,13 @@ type Deps struct {
 
 // Server is the assembled gateway process.
 type Server struct {
-	cfg     *config.Config
-	log     *slog.Logger
-	domains *domain.Service
-	hub     *gateway.Hub
-	handler http.Handler
+	cfg      *config.Config
+	log      *slog.Logger
+	domains  *domain.Service
+	hub      *gateway.Hub
+	recorder *inspect.Recorder // nil when the inspector is off
+	counter  *usage.Counter    // nil when statistics are off
+	handler  http.Handler
 }
 
 // New assembles a Server.
@@ -104,11 +112,37 @@ func New(d Deps) *Server {
 			Status string `json:"status"`
 		}{h.Status})
 	})
+	// The inspector needs somewhere to store captures and a key to encrypt
+	// them with; without either it stays off.
+	var recorder *inspect.Recorder
+	if cfg.Inspect && d.Captures != nil && len(cfg.EncryptionKey) == 32 {
+		sealer, err := inspect.NewSealer(cfg.EncryptionKey)
+		if err == nil {
+			recorder = inspect.NewRecorder(inspect.Options{
+				Store: d.Captures, Sealer: sealer, MaxBody: cfg.InspectMaxBody,
+				Retention: cfg.InspectRetention, MaxRows: cfg.InspectMaxRows, Logger: d.Logger,
+			})
+		}
+	}
+	ropts := router.Options{
+		BaseDomain: cfg.BaseDomain, Tunnels: hub, Management: mgmt, TrustedProxies: cfg.TrustedProxies,
+		MaxBodyBytes: cfg.MaxRequestBodyBytes, ResponseHeaderTimeout: cfg.ResponseHeaderTimeout, Logger: d.Logger,
+	}
+	if recorder != nil {
+		ropts.Inspector = recorder
+	}
+	var counter *usage.Counter
+	if d.Usage != nil {
+		counter = usage.NewCounter(d.Usage, d.Logger)
+		ropts.Usage = counter
+	}
+	rt := router.New(ropts)
+
 	dash := dashboard.New(dashboard.Options{
 		Store: d.Admin, Hub: hub, SessionSecret: cfg.JWTSecret, Secure: cfg.PublicScheme == "https",
 		BaseDomain: cfg.BaseDomain, PublicScheme: cfg.PublicScheme, PublicPort: cfg.PublicPort,
 		TCPPortMin: cfg.TCPPortMin, TCPPortMax: cfg.TCPPortMax, TrustedProxies: cfg.TrustedProxies,
-		HealthCheck: d.HealthCheck, Logger: d.Logger,
+		HealthCheck: d.HealthCheck, Logger: d.Logger, Inspector: recorder, Replay: rt,
 	})
 	mgmt.Handle("/dashboard", dash)
 	mgmt.Handle("/dashboard/", dash)
@@ -118,11 +152,7 @@ func New(d Deps) *Server {
 		w.Write([]byte("mancar gateway\n"))
 	})
 
-	rt := router.New(router.Options{
-		BaseDomain: cfg.BaseDomain, Tunnels: hub, Management: mgmt, TrustedProxies: cfg.TrustedProxies,
-		MaxBodyBytes: cfg.MaxRequestBodyBytes, ResponseHeaderTimeout: cfg.ResponseHeaderTimeout, Logger: d.Logger,
-	})
-	return &Server{cfg: cfg, log: d.Logger, domains: domains, hub: hub, handler: rt}
+	return &Server{cfg: cfg, log: d.Logger, domains: domains, hub: hub, recorder: recorder, counter: counter, handler: rt}
 }
 
 // Handler returns the public HTTP handler.
@@ -165,6 +195,19 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		}
 	}()
 
+	recCtx, stopRecorder := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopRecorder()
+	counterDone := make(chan struct{})
+	if s.counter != nil {
+		go func() { s.counter.Run(recCtx); close(counterDone) }()
+	} else {
+		close(counterDone)
+	}
+	if s.recorder != nil {
+		go s.recorder.Run(recCtx)
+		s.log.Info("request inspector enabled", "retention", s.recorder.Retention().String())
+	}
+
 	srv := &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -188,6 +231,17 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		srv.Close()
 	}
 	s.hub.Shutdown(sctx)
+	stopRecorder() // flush queued captures and pending traffic counts
+	if s.recorder != nil {
+		select {
+		case <-s.recorder.Done():
+		case <-sctx.Done():
+		}
+	}
+	select {
+	case <-counterDone:
+	case <-sctx.Done():
+	}
 	if err := <-errc; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

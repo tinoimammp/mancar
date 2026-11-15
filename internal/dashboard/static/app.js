@@ -5,7 +5,7 @@
 const API = "/api/v1/admin";
 const REFRESH_MS = 5000;
 
-const state = { user: null, view: "overview", data: {}, timer: null };
+const state = { user: null, view: "overview", data: {}, timer: null, reqHost: "" };
 
 // ---- DOM helpers -----------------------------------------------------------
 
@@ -117,6 +117,7 @@ async function api(method, path, body) {
 const VIEWS = {
   overview: { title: "Overview", load: loadOverview, render: renderOverview },
   agents: { title: "Agents & tunnels", load: () => api("GET", "/agents"), render: renderAgents },
+  requests: { title: "Requests", load: loadRequests, render: renderRequests },
   tokens: { title: "Tokens", load: () => api("GET", "/tokens"), render: renderTokens },
   users: { title: "Users", load: () => api("GET", "/users"), render: renderUsers },
   domains: { title: "Domains", load: () => api("GET", "/domains"), render: renderDomains },
@@ -241,7 +242,8 @@ async function refresh(first) {
     if (state.view !== view || !state.user) return;
     state.data[view] = data;
     // Don't redraw underneath an open dialog or while the user is typing.
-    if (first || !document.querySelector("dialog[open]")) draw();
+    const typing = document.activeElement && document.activeElement.matches("main input");
+    if (first || (!document.querySelector("dialog[open]") && !typing)) draw();
   } catch (e) {
     if (e.status === 401) return;
     if (first) document.getElementById("main").replaceChildren(head(VIEWS[view].title), h("div", { class: "error" }, e.message));
@@ -325,6 +327,29 @@ function renderOverview(o) {
       stat("Users", o.users),
       stat("Active tokens", o.active_tokens),
       stat("Reserved domains", o.reserved_domains),
+      stat("Requests (24h)", fmtNum(o.traffic_24h.requests)),
+      stat("Server errors (24h)", fmtNum(o.traffic_24h.errors)),
+      stat("Requests (all time)", fmtNum(o.traffic_total.requests)),
+    ),
+    h(
+      "section",
+      { class: "panel" },
+      h("div", { class: "panel-head" }, h("h2", {}, "Busiest hostnames"), h("span", { class: "muted small" }, "last 24 hours")),
+      table(
+        ["Hostname", "Requests", "Errors", "In", "Out"],
+        o.top_hosts.map((x) =>
+          h(
+            "tr",
+            {},
+            h("td", { class: "mono" }, x.hostname),
+            h("td", {}, fmtNum(x.usage.day.requests)),
+            h("td", {}, x.usage.day.errors ? h("span", { class: "badge danger" }, fmtNum(x.usage.day.errors)) : "0"),
+            h("td", { class: "muted" }, fmtBytes(x.usage.day.bytes_in)),
+            h("td", { class: "muted" }, fmtBytes(x.usage.day.bytes_out)),
+          ),
+        ),
+        "No HTTP traffic in the last 24 hours.",
+      ),
     ),
     h(
       "section",
@@ -356,6 +381,8 @@ function renderOverview(o) {
           h("dd", { class: "mono" }, o.tcp_ports),
           h("dt", {}, "Database"),
           h("dd", {}, db),
+          h("dt", {}, "Request inspector"),
+          h("dd", {}, o.inspector),
           h("dt", {}, "Uptime"),
           h("dd", {}, dur(o.uptime_seconds)),
         ),
@@ -363,6 +390,20 @@ function renderOverview(o) {
     ),
   ];
 }
+
+const fmtNum = (n) => Number(n || 0).toLocaleString();
+
+// usageCell shows 24-hour requests with the 7-day and lifetime totals underneath.
+const usageCell = (u) =>
+  h(
+    "td",
+    {
+      class: "nowrap",
+      title: `24h: ${fmtNum(u.day.errors)} server errors, ${fmtBytes(u.day.bytes_out)} sent\nAll time: ${fmtNum(u.total.errors)} server errors, ${fmtBytes(u.total.bytes_out)} sent`,
+    },
+    fmtNum(u.day.requests),
+    h("div", { class: "muted small" }, `${fmtNum(u.week.requests)} / 7d · ${fmtNum(u.total.requests)} total`),
+  );
 
 const stat = (label, value) => h("div", { class: "stat" }, h("div", { class: "label" }, label), h("div", { class: "value" }, value));
 
@@ -508,6 +549,7 @@ function renderUsers(d) {
       h("td", {}, u.connected_agents ? h("span", { class: "badge ok" }, h("span", { class: "dot" }), u.connected_agents + " online") : h("span", { class: "muted" }, "offline")),
       h("td", {}, u.active_tokens),
       h("td", {}, u.domains),
+      usageCell(u.usage),
       h("td", { title: fmtDate(u.created_at) }, ago(u.created_at)),
       h(
         "td",
@@ -529,7 +571,7 @@ function renderUsers(d) {
   );
   return [
     head("Users", "People or services that own agent tokens and hostnames.", h("button", { class: "btn primary", onclick: () => newTokenDialog() }, "New user")),
-    h("section", { class: "panel" }, table(["User", "Agents", "Active tokens", "Domains", "Created", ""], rows, "No users yet. Creating a token creates its user.")),
+    h("section", { class: "panel" }, table(["User", "Agents", "Active tokens", "Domains", "Requests (24h)", "Created", ""], rows, "No users yet. Creating a token creates its user.")),
   ];
 }
 
@@ -542,6 +584,7 @@ function renderDomains(d) {
       h("td", { class: "mono" }, x.hostname),
       h("td", {}, x.username),
       h("td", {}, h("span", { class: "badge" }, x.kind)),
+      usageCell(x.usage),
       h("td", {}, x.online ? h("span", { class: "badge ok" }, h("span", { class: "dot" }), "online") : h("span", { class: "badge warn", title: fmtDate(x.hold_until) }, "held, frees " + ago(x.hold_until))),
       h(
         "td",
@@ -561,8 +604,190 @@ function renderDomains(d) {
   );
   return [
     head("Domains", "Hostnames in use or held for their owner after a disconnect."),
-    h("section", { class: "panel" }, table(["Hostname", "User", "Kind", "Status", ""], rows, "No hostnames are reserved.")),
+    h("section", { class: "panel" }, table(["Hostname", "User", "Kind", "Requests (24h)", "Status", ""], rows, "No hostnames are reserved.")),
   ];
+}
+
+// requests (inspector)
+async function loadRequests() {
+  try {
+    return await api("GET", "/requests" + (state.reqHost ? "?host=" + encodeURIComponent(state.reqHost) : ""));
+  } catch (e) {
+    if (e.code === "inspector_disabled") return { disabled: e.message };
+    throw e;
+  }
+}
+
+const fmtBytes = (n) => (n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB");
+
+function statusBadge(code) {
+  const cls = code >= 500 ? "danger" : code >= 400 ? "warn" : code >= 200 && code < 400 ? "ok" : "";
+  return h("span", { class: "badge " + cls }, code || "—");
+}
+
+function renderRequests(d) {
+  if (d.disabled) {
+    return [
+      head("Requests"),
+      h("div", { class: "panel" }, h("div", { class: "empty" }, d.disabled, h("br"), "Set INSPECT=on and ENCRYPTION_KEY in .env, then restart the gateway.")),
+    ];
+  }
+  const filter = h("input", {
+    type: "search",
+    placeholder: "Filter by hostname, e.g. my-api." + location.hostname,
+    value: state.reqHost,
+    class: "filter",
+    "aria-label": "Filter by hostname",
+    onchange: (e) => {
+      state.reqHost = e.target.value.trim().toLowerCase();
+      refresh(true);
+    },
+  });
+  const rows = d.requests.map((r) =>
+    h(
+      "tr",
+      { class: "clickable", tabindex: "0", onclick: () => requestDialog(r.id), onkeydown: (e) => e.key === "Enter" && requestDialog(r.id) },
+      h("td", { class: "nowrap", title: fmtDate(r.time) }, new Date(r.time).toLocaleTimeString()),
+      h("td", {}, h("span", { class: "badge" }, r.method), r.replay ? h("span", { class: "badge", title: "Replayed from the dashboard" }, "replay") : null),
+      h("td", { class: "mono uri" }, h("span", { class: "muted" }, r.hostname), r.uri),
+      h("td", {}, statusBadge(r.status)),
+      h("td", { class: "nowrap" }, r.duration_ms + " ms"),
+      h("td", { class: "nowrap muted" }, fmtBytes(r.response_size)),
+    ),
+  );
+  const sub = `Last ${d.requests.length} HTTP requests through your tunnels. Stored encrypted, deleted after ${dur(d.retention_seconds)}.`;
+  return [
+    head(
+      "Requests",
+      sub,
+      filter,
+      h(
+        "button",
+        {
+          class: "btn danger",
+          onclick: confirmThen(state.reqHost ? `Delete every captured request for ${state.reqHost}?` : "Delete every captured request?", () =>
+            api("DELETE", "/requests" + (state.reqHost ? "?host=" + encodeURIComponent(state.reqHost) : "")),
+          ),
+        },
+        "Clear",
+      ),
+    ),
+    d.undecryptable ? h("div", { class: "notice" }, `${d.undecryptable} request(s) cannot be decrypted (ENCRYPTION_KEY changed?) and are hidden.`) : null,
+    h("section", { class: "panel" }, table(["Time", "Method", "URL", "Status", "Duration", "Size"], rows, "No requests captured yet. Open one of your tunnel URLs.")),
+  ];
+}
+
+function shellQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+const SKIP_CURL = new Set(["host", "content-length", "connection", "accept-encoding", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-real-ip"]);
+
+function toCurl(r) {
+  const parts = ["curl", "-X", r.method, shellQuote("https://" + r.hostname + r.uri)];
+  for (const [k, vs] of Object.entries(r.request_headers || {})) {
+    if (SKIP_CURL.has(k.toLowerCase())) continue;
+    for (const v of vs) parts.push("-H", shellQuote(k + ": " + v));
+  }
+  const b = r.request_body;
+  if (b && b.size > 0 && b.text != null && !b.truncated) parts.push("--data-binary", shellQuote(b.text));
+  return parts.join(" ");
+}
+
+function headersTable(hdrs) {
+  const entries = Object.entries(hdrs || {}).sort(([a], [b]) => a.localeCompare(b));
+  if (!entries.length) return h("p", { class: "muted small" }, "No headers.");
+  return h(
+    "table",
+    { class: "kvtable" },
+    h(
+      "tbody",
+      {},
+      entries.flatMap(([k, vs]) => vs.map((v) => h("tr", {}, h("th", { scope: "row" }, k), h("td", { class: "mono" }, v)))),
+    ),
+  );
+}
+
+function bodyView(b) {
+  if (!b || b.size === 0) return h("p", { class: "muted small" }, "Empty body.");
+  let text = b.text;
+  if (text != null) {
+    try {
+      text = JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      /* not JSON: show as is */
+    }
+  }
+  const notes = [fmtBytes(b.size)];
+  if (b.decoded) notes.push("decoded from " + b.decoded);
+  if (b.truncated) notes.push(`only the first ${fmtBytes(b.kept)} were kept`);
+  return h(
+    "div",
+    {},
+    h("p", { class: "muted small" }, notes.join(" · ")),
+    text != null ? h("pre", { class: "body" }, text) : h("p", { class: "muted small" }, "Binary content, not shown."),
+  );
+}
+
+async function requestDialog(id) {
+  let r;
+  try {
+    r = await api("GET", "/requests/" + encodeURIComponent(id));
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  const dlg = h("dialog", { class: "wide", "aria-label": "Request details" });
+  const close = () => {
+    dlg.close();
+    dlg.remove();
+  };
+  const replayBtn = h(
+    "button",
+    {
+      class: "btn primary",
+      disabled: !r.replayable,
+      title: r.replay_blocker || "Send this request to the tunnel again",
+      onclick: async () => {
+        if (!confirm(`Send ${r.method} ${r.uri} to ${r.hostname} again? The application will process it a second time.`)) return;
+        replayBtn.disabled = true;
+        try {
+          const res = await api("POST", `/requests/${encodeURIComponent(r.id)}/replay`);
+          toast(`Replayed: ${res.status} in ${res.duration_ms} ms`);
+          close();
+          refresh();
+        } catch (e) {
+          toast(e.message);
+          replayBtn.disabled = false;
+        }
+      },
+    },
+    "Replay",
+  );
+  dlg.append(
+    h(
+      "div",
+      { class: "dialog-body" },
+      h("div", { class: "req-title" }, h("span", { class: "badge" }, r.method), statusBadge(r.status), h("span", { class: "mono uri" }, r.hostname + r.uri)),
+      h("p", { class: "muted small" }, `${fmtDate(r.time)} · ${r.duration_ms} ms · from ${r.client}${r.replay ? " · replayed from the dashboard" : ""}`),
+      r.replay_blocker ? h("div", { class: "notice" }, "Cannot replay: " + r.replay_blocker) : null,
+      h("h3", {}, "Request headers"),
+      headersTable(r.request_headers),
+      h("h3", {}, "Request body"),
+      bodyView(r.request_body),
+      h("h3", {}, "Response headers"),
+      headersTable(r.response_headers),
+      h("h3", {}, "Response body"),
+      bodyView(r.response_body),
+      h("div", { class: "row" }, h("button", { class: "btn", onclick: () => copy(toCurl(r)) }, "Copy as curl"), h("button", { class: "btn", onclick: close }, "Close"), replayBtn),
+    ),
+  );
+  dlg.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    close();
+  });
+  document.body.append(dlg);
+  dlg.showModal();
 }
 
 // ---- start -----------------------------------------------------------------

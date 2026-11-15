@@ -22,16 +22,38 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tinoimammp/mancar/internal/gateway"
+	"github.com/tinoimammp/mancar/internal/inspect"
 	"github.com/tinoimammp/mancar/internal/netutil"
+	"github.com/tinoimammp/mancar/internal/protocol"
 )
 
 // Tunnels is the part of the gateway the router needs.
 type Tunnels interface {
 	LookupHost(hostname string) *gateway.Tunnel
 	LookupID(id string) *gateway.Tunnel
+}
+
+// Inspector receives a copy of every proxied HTTP exchange.
+type Inspector interface {
+	MaxBody() int
+	Submit(*inspect.Record)
+}
+
+// Usage counts traffic per hostname (dashboard statistics).
+type Usage interface {
+	Add(userID, hostname string, status int, bytesIn, bytesOut int64)
+}
+
+type replayKey struct{}
+
+// WithReplay marks a request as a dashboard replay (shown as such in the
+// inspector). It is a context value, so public clients cannot set it.
+func WithReplay(ctx context.Context) context.Context {
+	return context.WithValue(ctx, replayKey{}, true)
 }
 
 // Options configures a Router.
@@ -43,6 +65,10 @@ type Options struct {
 	MaxBodyBytes          int64 // 0 = unlimited
 	ResponseHeaderTimeout time.Duration
 	Logger                *slog.Logger
+	// Inspector, when set, records HTTP exchanges (request inspector).
+	Inspector Inspector
+	// Usage, when set, counts requests and bytes per hostname.
+	Usage Usage
 }
 
 // Router is the public HTTP entry point.
@@ -139,10 +165,42 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	sw := &statusWriter{ResponseWriter: w}
+	reqBytes := &countingBody{ReadCloser: r.Body}
+	if r.Body != nil && r.Body != http.NoBody {
+		r.Body = reqBytes
+	}
+	var rec *inspect.Record
+	var reqBuf *inspect.Buffer
+	if ins := rt.opts.Inspector; ins != nil {
+		replay, _ := r.Context().Value(replayKey{}).(bool)
+		rec = &inspect.Record{
+			ID: inspect.NewID(), UserID: t.UserID, Hostname: host, TunnelID: t.ID, Time: start,
+			Method: r.Method, URI: r.URL.RequestURI(), Proto: r.Proto, Client: info.client.IP,
+			ReqHeader: r.Header.Clone(), Replay: replay,
+		}
+		reqBuf = inspect.NewBuffer(ins.MaxBody())
+		r.Body = inspect.TeeBody(r.Body, reqBuf)
+		sw.capture = inspect.NewBuffer(ins.MaxBody())
+	}
 	rt.proxy.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), ctxKey{}, info)))
+	if rec != nil {
+		rec.DurationMs = time.Since(start).Milliseconds()
+		rec.Status = sw.status
+		rec.ReqBody, rec.ReqSize = reqBuf.Snapshot()
+		rec.RespBody, rec.RespSize = sw.capture.Snapshot()
+		rec.RespHeader = sw.header
+		rt.opts.Inspector.Submit(rec)
+	}
+	dur := time.Since(start)
+	in := reqBytes.n.Load()
+	t.Notify(&protocol.Event{Time: start, Method: r.Method, Path: r.URL.Path, Status: sw.status,
+		DurationMs: dur.Milliseconds(), BytesIn: in, BytesOut: sw.bytes, Remote: info.client.IP})
+	if rt.opts.Usage != nil {
+		rt.opts.Usage.Add(t.UserID, host, sw.status, in, sw.bytes)
+	}
 	// The query string is deliberately not logged: it often carries secrets.
 	rt.log.Info("request", "host", host, "method", r.Method, "path", r.URL.Path, "status", sw.status,
-		"duration_ms", time.Since(start).Milliseconds(), "client", info.client.IP, "tunnel", t.ID)
+		"duration_ms", dur.Milliseconds(), "client", info.client.IP, "tunnel", t.ID)
 }
 
 func (rt *Router) proxyError(w http.ResponseWriter, r *http.Request, err error) {
@@ -168,25 +226,52 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	fmt.Fprintf(w, "%s (%s)\n", msg, code)
 }
 
-// statusWriter records the response status for access logs while keeping
+// statusWriter records the response status for access logs (and, for the
+// inspector, the response headers and the start of the body) while keeping
 // Flush and Hijack (needed for streaming and WebSocket upgrades) working.
 type statusWriter struct {
 	http.ResponseWriter
-	status int
+	status  int
+	bytes   int64           // response body bytes written
+	capture *inspect.Buffer // nil unless the inspector is on
+	header  http.Header
+}
+
+// countingBody counts request body bytes read by the proxy. The counter is
+// atomic because the transport may still be reading when ServeHTTP returns.
+type countingBody struct {
+	io.ReadCloser
+	n atomic.Int64
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (s *statusWriter) begin(code int) {
+	if s.status == 0 {
+		s.status = code
+		if s.capture != nil {
+			s.header = s.ResponseWriter.Header().Clone()
+		}
+	}
 }
 
 func (s *statusWriter) WriteHeader(code int) {
-	if s.status == 0 {
-		s.status = code
-	}
+	s.begin(code)
 	s.ResponseWriter.WriteHeader(code)
 }
 
 func (s *statusWriter) Write(b []byte) (int, error) {
-	if s.status == 0 {
-		s.status = http.StatusOK
+	s.begin(http.StatusOK)
+	n, err := s.ResponseWriter.Write(b)
+	s.bytes += int64(n)
+	if s.capture != nil && n > 0 {
+		s.capture.Write(b[:n])
 	}
-	return s.ResponseWriter.Write(b)
+	return n, err
 }
 
 func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
@@ -194,8 +279,6 @@ func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 func (s *statusWriter) Flush() { _ = http.NewResponseController(s.ResponseWriter).Flush() }
 
 func (s *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if s.status == 0 {
-		s.status = http.StatusSwitchingProtocols
-	}
+	s.begin(http.StatusSwitchingProtocols)
 	return http.NewResponseController(s.ResponseWriter).Hijack()
 }

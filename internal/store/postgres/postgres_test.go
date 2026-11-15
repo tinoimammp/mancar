@@ -19,7 +19,9 @@ import (
 	"github.com/tinoimammp/mancar/internal/auth"
 	"github.com/tinoimammp/mancar/internal/domain"
 	"github.com/tinoimammp/mancar/internal/domain/domaintest"
+	"github.com/tinoimammp/mancar/internal/inspect"
 	"github.com/tinoimammp/mancar/internal/store/postgres"
+	"github.com/tinoimammp/mancar/internal/usage"
 	"github.com/tinoimammp/mancar/migrations"
 )
 
@@ -137,7 +139,7 @@ func TestMigrate_CreatesSchemaAndIsIdempotent(t *testing.T) {
 			t.Fatalf("Migrate run %d: %v", i+1, err)
 		}
 	}
-	for _, table := range []string{"users", "agent_tokens", "domains", "admins", "schema_migrations"} {
+	for _, table := range []string{"users", "agent_tokens", "domains", "admins", "captured_requests", "usage_hourly", "usage_daily", "usage_total", "schema_migrations"} {
 		if n := count(t, st, `SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1`, table); n != 1 {
 			t.Errorf("table %s missing", table)
 		}
@@ -633,5 +635,95 @@ func TestUsersAndDomainsListing(t *testing.T) {
 	}
 	if n := count(t, st, `SELECT count(*) FROM agent_tokens`); n != 0 {
 		t.Errorf("tokens not cascaded on user delete: %d", n)
+	}
+}
+
+func TestCaptures_InsertListPurgeDelete(t *testing.T) {
+	st := newStore(t, true)
+	ctx := context.Background()
+	uid, _ := st.EnsureUser(ctx, "alice")
+	now := time.Now()
+	mk := func(host string, age time.Duration) inspect.Row {
+		return inspect.Row{ID: inspect.NewID(), UserID: uid, Hostname: host, Status: 200, CreatedAt: now.Add(-age),
+			Nonce: []byte("n"), Ciphertext: []byte("c")}
+	}
+	rows := []inspect.Row{mk("a.example.com", time.Minute), mk("b.example.com", 2*time.Minute), mk("a.example.com", 48*time.Hour)}
+	if err := st.InsertCaptures(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := st.ListCaptures(ctx, inspect.Filter{Hostname: "a.example.com"}); len(got) != 2 || got[0].ID != rows[0].ID {
+		t.Errorf("list by host, newest first: %+v", got)
+	}
+	if got, err := st.GetCapture(ctx, rows[1].ID); err != nil || string(got.Ciphertext) != "c" || got.UserID != uid {
+		t.Errorf("get: %+v %v", got, err)
+	}
+	if n, err := st.PurgeCaptures(ctx, now.Add(-24*time.Hour), 1); err != nil || n != 2 {
+		t.Errorf("purge by age then count: n=%d err=%v", n, err)
+	}
+	if got, _ := st.ListCaptures(ctx, inspect.Filter{}); len(got) != 1 || got[0].ID != rows[0].ID {
+		t.Errorf("after purge: %+v", got)
+	}
+	if err := st.DeleteUser(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, st, `SELECT count(*) FROM captured_requests`); n != 0 {
+		t.Errorf("captures survived deleting their user: %d", n)
+	}
+}
+
+func TestUsage_UpsertWindowsAndPurge(t *testing.T) {
+	st := newStore(t, true)
+	ctx := context.Background()
+	uid, _ := st.EnsureUser(ctx, "alice")
+	hour := time.Now().UTC().Truncate(time.Hour)
+	add := func(h time.Time, req, errs int64) {
+		t.Helper()
+		if err := st.AddUsage(ctx, []usage.Row{{UserID: uid, Hostname: "a.example.com", Hour: h, Requests: req, Errors: errs, BytesIn: 10, BytesOut: 20}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add(hour, 3, 1)
+	add(hour, 2, 0)                     // same hour: summed
+	add(hour.Add(-72*time.Hour), 10, 0) // in the week, not the day
+	add(hour.Add(-30*24*time.Hour), 99, 0)
+
+	byHost, err := st.UsageByHost(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := byHost["a.example.com"]
+	if w.Day.Requests != 5 || w.Day.Errors != 1 || w.Day.BytesIn != 20 || w.Week.Requests != 15 {
+		t.Errorf("windows: %+v", w)
+	}
+	if w.Total.Requests != 114 {
+		t.Errorf("lifetime total: %+v", w.Total)
+	}
+	if byUser, _ := st.UsageByUser(ctx); byUser[uid].Week.Requests != 15 || byUser[uid].Total.Requests != 114 {
+		t.Errorf("by user: %+v", byUser)
+	}
+	if n, err := st.PurgeUsage(ctx, hour.Add(-7*24*time.Hour)); err != nil || n != 1 {
+		t.Errorf("purge: n=%d err=%v", n, err)
+	}
+	// Purging hourly rows keeps the daily history and the lifetime total.
+	if after, _ := st.UsageByHost(ctx); after["a.example.com"].Total.Requests != 114 {
+		t.Errorf("lifetime total changed by the hourly purge: %+v", after["a.example.com"])
+	}
+	if n := count(t, st, `SELECT count(*) FROM usage_daily`); n != 3 {
+		t.Errorf("daily rows: %d, want 3", n)
+	}
+	// Several hours of one day in one batch are combined, not rejected.
+	if err := st.AddUsage(ctx, []usage.Row{
+		{UserID: uid, Hostname: "c.example.com", Hour: hour, Requests: 1},
+		{UserID: uid, Hostname: "c.example.com", Hour: hour.Add(-time.Hour), Requests: 2},
+	}); err != nil {
+		t.Fatalf("batch with two hours of one day: %v", err)
+	}
+	if err := st.DeleteUser(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"usage_hourly", "usage_daily", "usage_total"} {
+		if n := count(t, st, `SELECT count(*) FROM `+table); n != 0 {
+			t.Errorf("%s survived deleting the user: %d", table, n)
+		}
 	}
 }

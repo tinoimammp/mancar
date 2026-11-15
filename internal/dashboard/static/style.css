@@ -145,6 +145,21 @@ dialog::backdrop { background: rgb(0 0 0 / .45); }
 pre { margin: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; }
 .notice { background: var(--warn-bg); color: var(--warn); padding: 8px 10px; border-radius: 8px; font-size: 13px; }
 
+/* request inspector */
+.filter { width: min(320px, 100%); }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--panel-2); }
+tr.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+td.nowrap { white-space: nowrap; }
+.uri { overflow-wrap: anywhere; }
+dialog.wide { width: min(860px, calc(100vw - 32px)); }
+.req-title { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 15px; }
+.dialog-body h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); margin-top: 4px; }
+.kvtable { font-size: 12.5px; }
+.kvtable th { background: none; text-transform: none; letter-spacing: 0; font-family: var(--mono); font-weight: 600; color: var(--text); width: 1%; white-space: nowrap; padding: 4px 12px 4px 0; }
+.kvtable td { padding: 4px 0; overflow-wrap: anywhere; }
+pre.body { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 .toast { position: fixed; bottom: 20px; right: 20px; background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transform: translateY(8px); transition: .2s; pointer-events: none; max-width: calc(100vw - 40px); }
 .toast.show { opacity: 1; transform: none; }
 

@@ -31,9 +31,11 @@ import (
 	"time"
 
 	"github.com/tinoimammp/mancar/internal/gateway"
+	"github.com/tinoimammp/mancar/internal/inspect"
 	"github.com/tinoimammp/mancar/internal/netutil"
 	"github.com/tinoimammp/mancar/internal/ratelimit"
 	"github.com/tinoimammp/mancar/internal/store/postgres"
+	"github.com/tinoimammp/mancar/internal/usage"
 	"github.com/tinoimammp/mancar/internal/version"
 )
 
@@ -57,6 +59,9 @@ type Store interface {
 
 	ListDomains(ctx context.Context) ([]postgres.DomainInfo, error)
 	ReleaseDomain(ctx context.Context, hostname string) error
+
+	UsageByHost(ctx context.Context) (map[string]postgres.UsageWindows, error)
+	UsageByUser(ctx context.Context) (map[string]postgres.UsageWindows, error)
 }
 
 // Hub is the part of the gateway the dashboard reads and controls.
@@ -87,6 +92,10 @@ type Options struct {
 	Logger      *slog.Logger
 	// Now replaces the clock (tests).
 	Now func() time.Time
+	// Inspector is the request inspector; nil when it is off.
+	Inspector *inspect.Recorder
+	// Replay serves replayed requests (the public router).
+	Replay http.Handler
 }
 
 // Dashboard is an http.Handler for /dashboard/ and /api/v1/admin/.
@@ -152,6 +161,10 @@ func New(opts Options) *Dashboard {
 	d.mux.HandleFunc("POST /api/v1/admin/tokens/{id}/revoke", d.authed(d.revokeToken))
 	d.mux.HandleFunc("GET /api/v1/admin/domains", d.authed(d.domains))
 	d.mux.HandleFunc("DELETE /api/v1/admin/domains/{hostname}", d.authed(d.releaseDomain))
+	d.mux.HandleFunc("GET /api/v1/admin/requests", d.authed(d.listRequests))
+	d.mux.HandleFunc("DELETE /api/v1/admin/requests", d.authed(d.clearRequests))
+	d.mux.HandleFunc("GET /api/v1/admin/requests/{id}", d.authed(d.getRequest))
+	d.mux.HandleFunc("POST /api/v1/admin/requests/{id}/replay", d.authed(d.replayRequest))
 	d.mux.HandleFunc("/api/v1/admin/", func(w http.ResponseWriter, _ *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "no such endpoint")
 	})
@@ -369,9 +382,17 @@ func (d *Dashboard) overview(w http.ResponseWriter, r *http.Request) {
 		Users      int           `json:"users"`
 		Tokens     int           `json:"active_tokens"`
 		Domains    int           `json:"reserved_domains"`
+		Inspector  string        `json:"inspector"`
+		Traffic    usage.Totals  `json:"traffic_24h"`
+		AllTime    usage.Totals  `json:"traffic_total"`
+		TopHosts   []hostUsage   `json:"top_hosts"`
 	}
 	o := out{Version: version.Version, BaseDomain: d.opts.BaseDomain, Database: "ok",
-		Uptime: int64(d.opts.Now().Sub(d.startedAt) / time.Second), Gateway: d.opts.Hub.Stats(), TCPPorts: "off"}
+		Uptime: int64(d.opts.Now().Sub(d.startedAt) / time.Second), Gateway: d.opts.Hub.Stats(), TCPPorts: "off",
+		Inspector: "off"}
+	if d.opts.Inspector != nil {
+		o.Inspector = "on, kept " + d.opts.Inspector.Retention().String()
+	}
 	if d.opts.TCPPortMin > 0 {
 		o.TCPPorts = strconv.Itoa(d.opts.TCPPortMin) + "-" + strconv.Itoa(d.opts.TCPPortMax)
 	}
@@ -394,7 +415,34 @@ func (d *Dashboard) overview(w http.ResponseWriter, r *http.Request) {
 		o.Tokens += u.ActiveTokens
 		o.Domains += u.Domains
 	}
+	o.TopHosts = []hostUsage{}
+	if byHost, err := d.opts.Store.UsageByHost(r.Context()); err != nil {
+		d.log.Warn("dashboard: reading traffic statistics failed", "err", err)
+	} else {
+		for host, u := range byHost {
+			o.Traffic.Requests += u.Day.Requests
+			o.Traffic.Errors += u.Day.Errors
+			o.Traffic.BytesIn += u.Day.BytesIn
+			o.Traffic.BytesOut += u.Day.BytesOut
+			o.AllTime.Requests += u.Total.Requests
+			o.AllTime.Errors += u.Total.Errors
+			o.AllTime.BytesIn += u.Total.BytesIn
+			o.AllTime.BytesOut += u.Total.BytesOut
+			if u.Day.Requests > 0 {
+				o.TopHosts = append(o.TopHosts, hostUsage{Hostname: host, Usage: u})
+			}
+		}
+		sort.Slice(o.TopHosts, func(i, j int) bool { return o.TopHosts[i].Usage.Day.Requests > o.TopHosts[j].Usage.Day.Requests })
+		if len(o.TopHosts) > 10 {
+			o.TopHosts = o.TopHosts[:10]
+		}
+	}
 	writeJSON(w, http.StatusOK, o)
+}
+
+type hostUsage struct {
+	Hostname string                `json:"hostname"`
+	Usage    postgres.UsageWindows `json:"usage"`
 }
 
 // usernames maps user IDs to names for annotating live sessions.
@@ -444,17 +492,22 @@ func (d *Dashboard) users(w http.ResponseWriter, r *http.Request) {
 	for _, s := range d.opts.Hub.Sessions() {
 		online[s.UserID]++
 	}
+	traffic, err := d.opts.Store.UsageByUser(r.Context())
+	if err != nil {
+		d.log.Warn("dashboard: reading traffic statistics failed", "err", err)
+	}
 	type user struct {
-		ID           string    `json:"id"`
-		Username     string    `json:"username"`
-		CreatedAt    time.Time `json:"created_at"`
-		ActiveTokens int       `json:"active_tokens"`
-		Domains      int       `json:"domains"`
-		Agents       int       `json:"connected_agents"`
+		ID           string                `json:"id"`
+		Username     string                `json:"username"`
+		CreatedAt    time.Time             `json:"created_at"`
+		ActiveTokens int                   `json:"active_tokens"`
+		Domains      int                   `json:"domains"`
+		Agents       int                   `json:"connected_agents"`
+		Usage        postgres.UsageWindows `json:"usage"`
 	}
 	out := []user{}
 	for _, u := range users {
-		out = append(out, user{u.ID, u.Username, u.CreatedAt, u.ActiveTokens, u.Domains, online[u.ID]})
+		out = append(out, user{u.ID, u.Username, u.CreatedAt, u.ActiveTokens, u.Domains, online[u.ID], traffic[u.ID]})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})
 }
@@ -491,16 +544,21 @@ func (d *Dashboard) domains(w http.ResponseWriter, r *http.Request) {
 		d.internal(w, "list domains", err)
 		return
 	}
+	traffic, err := d.opts.Store.UsageByHost(r.Context())
+	if err != nil {
+		d.log.Warn("dashboard: reading traffic statistics failed", "err", err)
+	}
 	type dom struct {
-		Hostname  string     `json:"hostname"`
-		Username  string     `json:"username"`
-		Kind      string     `json:"kind"`
-		Online    bool       `json:"online"`
-		HoldUntil *time.Time `json:"hold_until,omitempty"`
+		Hostname  string                `json:"hostname"`
+		Username  string                `json:"username"`
+		Kind      string                `json:"kind"`
+		Online    bool                  `json:"online"`
+		HoldUntil *time.Time            `json:"hold_until,omitempty"`
+		Usage     postgres.UsageWindows `json:"usage"`
 	}
 	out := []dom{}
 	for _, x := range list {
-		v := dom{Hostname: x.Hostname, Username: x.Username, Kind: x.Kind, Online: x.Online}
+		v := dom{Hostname: x.Hostname, Username: x.Username, Kind: x.Kind, Online: x.Online, Usage: traffic[x.Hostname]}
 		if !x.Online {
 			h := x.HoldUntil
 			v.HoldUntil = &h

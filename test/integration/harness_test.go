@@ -18,6 +18,7 @@ import (
 	"github.com/tinoimammp/mancar/internal/auth"
 	"github.com/tinoimammp/mancar/internal/config"
 	"github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/protocol"
 	"github.com/tinoimammp/mancar/internal/server"
 )
 
@@ -37,6 +38,12 @@ type env struct {
 
 func newEnv(t *testing.T, overrides map[string]string) *env {
 	t.Helper()
+	return newEnvWith(t, overrides, nil)
+}
+
+// newEnvWith is newEnv with a hook to adjust the server dependencies.
+func newEnvWith(t *testing.T, overrides map[string]string, mutate func(*server.Deps)) *env {
+	t.Helper()
 	vars := map[string]string{
 		"APP_ENV": "development", "STORAGE": "memory", "BASE_DOMAIN": baseDomain,
 		"PUBLIC_SCHEME": "http", "TCP_PORT_RANGE": "39200-39260",
@@ -54,7 +61,11 @@ func newEnv(t *testing.T, overrides map[string]string) *env {
 		defer e.clockMu.Unlock()
 		return time.Now().Add(e.offset)
 	}
-	e.srv = server.New(server.Deps{Config: cfg, Auth: e.auth, Registry: e.reg, TCPBindHost: "127.0.0.1", KeepAlive: time.Second})
+	deps := server.Deps{Config: cfg, Auth: e.auth, Registry: e.reg, TCPBindHost: "127.0.0.1", KeepAlive: time.Second}
+	if mutate != nil {
+		mutate(&deps)
+	}
+	e.srv = server.New(deps)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +131,7 @@ func (e *env) token(user string) string {
 // runningAgent is an agent started in the background.
 type runningAgent struct {
 	status chan agent.Status
+	events chan protocol.Event // request log; every test agent asks for it
 	result chan error
 	cancel context.CancelFunc
 }
@@ -129,13 +141,19 @@ func (e *env) startAgent(token, dialAddr string, specs ...agent.TunnelSpec) *run
 	if dialAddr == "" {
 		dialAddr = e.addr
 	}
-	ra := &runningAgent{status: make(chan agent.Status, 64), result: make(chan error, 1)}
+	ra := &runningAgent{status: make(chan agent.Status, 64), events: make(chan protocol.Event, 256), result: make(chan error, 1)}
 	a, err := agent.New(agent.Options{
 		ServerURL: "http://" + baseDomain, DialAddr: dialAddr, Token: token, Tunnels: specs,
 		KeepAlive: time.Second, MinBackoff: 20 * time.Millisecond, MaxBackoff: 200 * time.Millisecond,
 		OnStatus: func(s agent.Status) {
 			select {
 			case ra.status <- s:
+			default:
+			}
+		},
+		OnEvent: func(_ agent.TunnelSpec, ev protocol.Event) {
+			select {
+			case ra.events <- ev:
 			default:
 			}
 		},
