@@ -87,6 +87,8 @@ account first (a strong password is generated and shown once):
 docker compose exec gateway /mancard admin set --user admin
 ```
 
+Already running nginx on ports 80/443? See [docs/NGINX.md](docs/NGINX.md).
+
 Step-by-step with troubleshooting: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Use the client
