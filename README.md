@@ -27,7 +27,7 @@ There are two programs:
 | | Raw TCP tunnels (databases, SSH, game servers) | ✅ |
 | | Custom (`my-api`) or random (`blue-falcon`) subdomains | ✅ |
 | | Several tunnels per client, saved and started together | ✅ |
-| | Live request log in the client terminal (method, path, status, time) | ✅ |
+| | Live request log in the client terminal, static files summarised | ✅ |
 | | Automatic reconnect, same public address afterwards | ✅ |
 | | `mancar update`: self-update with checksum verification | ✅ |
 | | UDP tunnels | ❌ |
@@ -178,16 +178,21 @@ mancar http 3000                      # asks which one you want
 mancar tcp 5432                       # raw TCP, e.g. a database -> YOUR_DOMAIN:200xx
 ```
 
-While it runs, every request is printed:
+While it runs, requests are printed. Successful static files (`.js`, `.css`,
+images, fonts) are folded into one line per page load, so the requests that
+matter stay visible; failed ones are always listed:
 
 ```text
 Requests
 --------
-14:02:11  GET    /api/users                               200 OK                   12 ms
+14:02:11  GET    /                                        200 OK                   45 ms
+          + 23 static files (1.2 MB)
 14:02:13  POST   /api/login                               401 Unauthorized         8 ms
+14:02:14  GET    /assets/app.js                           404 Not Found            2 ms
 ```
 
-Add `--quiet` to hide the log. Stop with Ctrl+C. If the connection drops, the
+`--log all` lists every request, `--log errors` only 4xx/5xx, `--quiet` none.
+Every request is also in the dashboard's **Requests** page. Stop with Ctrl+C. If the connection drops, the
 client reconnects and keeps the same address.
 
 ### Save tunnels and run them together

@@ -5,6 +5,15 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 `mancard` gateway for Linux, and the Docker images
 `ghcr.io/tinoimammp/mancar` and `ghcr.io/tinoimammp/mancar-edge`.
 
+## [v0.3.1] - 2026-11-15
+
+### Changed
+- The client's request log no longer lists every successful static file
+  (`.js`, `.css`, images, fonts, media): they are summarised as
+  `+ 23 static files (1.2 MB)` per page load. Failed static files are still
+  listed. New `--log all|errors|smart` flag (`smart` is the default; `--quiet`
+  still hides the log).
+
 ## [v0.3.0] - 2026-11-15
 
 ### Added
@@ -96,6 +105,7 @@ First release.
   rate limiting.
 - Built with Go 1.26.11.
 
+[v0.3.1]: https://github.com/tinoimammp/mancar/compare/v0.3.0...v0.3.1
 [v0.3.0]: https://github.com/tinoimammp/mancar/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/tinoimammp/mancar/compare/v0.1.0...v0.2.0
 [v0.1.0]: https://github.com/tinoimammp/mancar/releases/tag/v0.1.0
