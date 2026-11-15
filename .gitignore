@@ -1,0 +1,20 @@
+# Secrets and local state: never commit these.
+.env
+.env.*
+!.env.example
+backups/
+*.sql
+*.sql.gz
+!migrations/*.sql
+
+# Build output
+/dist/
+/bin/
+*.test
+*.out
+coverage.txt
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
