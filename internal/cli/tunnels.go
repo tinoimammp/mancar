@@ -24,6 +24,7 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 	server := fs.String("server", "", "gateway URL (overrides MANCAR_SERVER and the config file)")
 	subdomain := fs.String("subdomain", "", "request this subdomain (http only)")
 	random := fs.Bool("random", false, "use a random subdomain (http only)")
+	last := fs.Bool("last", false, "reuse the subdomain used most recently with this server (http only)")
 	quiet := fs.Bool("quiet", false, "do not print the request log")
 	logFlag := fs.String("log", logSmart, "request log: smart (summarise static files), all, errors")
 	pos, err := parseFlags(fs, args)
@@ -37,11 +38,11 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 	if len(pos) != 1 {
 		return fail(e, 2, "usage: mancar %s PORT|HOST:PORT%s", proto, map[bool]string{true: " [--subdomain NAME | --random]"}[proto == protocol.ProtoHTTP])
 	}
-	if proto == protocol.ProtoTCP && (*subdomain != "" || *random) {
-		return fail(e, 2, "--subdomain and --random only apply to http tunnels")
+	if proto == protocol.ProtoTCP && (*subdomain != "" || *random || *last) {
+		return fail(e, 2, "--subdomain, --random and --last only apply to http tunnels")
 	}
-	if *subdomain != "" && *random {
-		return fail(e, 2, "--subdomain and --random cannot be combined")
+	if n := btoi(*subdomain != "") + btoi(*random) + btoi(*last); n > 1 {
+		return fail(e, 2, "--subdomain, --random and --last cannot be combined")
 	}
 	addr, err := parseLocalAddr(pos[0])
 	if err != nil {
@@ -54,17 +55,6 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 			return fail(e, 2, "invalid subdomain: %v", err)
 		}
 	}
-	var p *prompter
-	if e.Interactive {
-		p = newPrompter(e)
-	}
-	if proto == protocol.ProtoHTTP && label == "" && !*random && p != nil {
-		var ok bool
-		if label, ok = chooseSubdomain(p); !ok {
-			return fail(e, 1, "no input; aborting")
-		}
-	}
-
 	fc, err := e.loadConfig()
 	if err != nil {
 		return fail(e, 1, "%v", err)
@@ -72,6 +62,24 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 	s, err := e.resolve(*server, fc)
 	if err != nil {
 		return fail(e, 2, "%v", err)
+	}
+
+	recent := e.recentSubdomains(s.server)
+	if *last {
+		if len(recent) == 0 {
+			return fail(e, 2, "no subdomain has been used with %s yet; use --subdomain NAME or --random", s.server)
+		}
+		label = recent[0].Label
+	}
+	var p *prompter
+	if e.Interactive {
+		p = newPrompter(e)
+	}
+	if proto == protocol.ProtoHTTP && label == "" && !*random && p != nil {
+		var ok bool
+		if label, ok = chooseSubdomain(p, recent, e.Now()); !ok {
+			return fail(e, 1, "no input; aborting")
+		}
 	}
 	spec := agent.TunnelSpec{Proto: proto, LocalAddr: addr, Subdomain: label}
 	if label != "" {
@@ -126,8 +134,25 @@ func cmdStart(ctx context.Context, e Env, args []string) int {
 	return runTunnels(ctx, e, s, specs, nil, mode)
 }
 
-func chooseSubdomain(p *prompter) (string, bool) {
-	fmt.Fprint(p.out, "Select your tunnel domain:\n\n  1) Random subdomain\n  2) Custom subdomain\n\n")
+// chooseSubdomain asks for random, custom or one of the recently used
+// subdomains (most recent first).
+func chooseSubdomain(p *prompter, recent []recentSubdomain, now time.Time) (string, bool) {
+	if len(recent) > recentShown {
+		recent = recent[:recentShown]
+	}
+	fmt.Fprint(p.out, "Select your tunnel domain:\n\n  1) Random subdomain\n  2) Custom subdomain\n")
+	if len(recent) > 0 {
+		fmt.Fprintln(p.out, "\n  Recently used:")
+	}
+	for i, r := range recent {
+		note := "used " + agoText(now, r.UsedAt)
+		if r.Random {
+			note = "random, " + note
+		}
+		fmt.Fprintf(p.out, "  %d) %-24s (%s)\n", i+3, r.Label, note)
+	}
+	fmt.Fprintln(p.out)
+	max := 2 + len(recent)
 	for {
 		ans, ok := p.ask("Choice [1]: ")
 		if !ok {
@@ -139,8 +164,23 @@ func chooseSubdomain(p *prompter) (string, bool) {
 		case "2":
 			return askSubdomain(p)
 		}
-		fmt.Fprintln(p.out, "Please enter 1 or 2.")
+		if n, err := strconv.Atoi(ans); err == nil && n >= 3 && n <= max {
+			fmt.Fprintln(p.out, "Checking availability...")
+			return recent[n-3].Label, true
+		}
+		if max == 2 {
+			fmt.Fprintln(p.out, "Please enter 1 or 2.")
+		} else {
+			fmt.Fprintf(p.out, "Please enter a number from 1 to %d.\n", max)
+		}
 	}
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func askSubdomain(p *prompter) (string, bool) {
@@ -181,6 +221,9 @@ func runTunnels(ctx context.Context, e Env, s settings, specs []agent.TunnelSpec
 			OnStatus: func(st agent.Status) {
 				inst.update(st)
 				r.onStatus(st)
+				if st.State == agent.StateOnline {
+					e.rememberTunnels(s.server, st.Tunnels)
+				}
 			},
 		}
 		if mode != logOff {

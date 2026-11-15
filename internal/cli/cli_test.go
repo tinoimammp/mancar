@@ -230,7 +230,9 @@ func TestInteractiveMenuInputHandling(t *testing.T) {
 		p := m.startIn("x\n2\n\nab\nadmin\nvalid-name\n", true, "http", port)
 		p.waitOut(t, "Status: ONLINE")
 		out := p.out.String()
-		for _, want := range []string{"Please enter 1 or 2.", "A subdomain is required.", "Try again.", "http://valid-name.tunnel.test"} {
+		// The earlier subtest left a random name in the history, so the menu
+		// now has a third option.
+		for _, want := range []string{"Please enter a number from 1 to 3.", "A subdomain is required.", "Try again.", "http://valid-name.tunnel.test"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("stdout is missing %q:\n%s", want, out)
 			}
@@ -253,6 +255,51 @@ func TestInteractiveMenuInputHandling(t *testing.T) {
 		p.cancel()
 		p.waitExit(t)
 	})
+}
+
+func TestRecentSubdomainsAreOffered(t *testing.T) {
+	gw := startGateway(t, "")
+	m := newMachine(t, connected(gw))
+	port := httpBackend(t, "app")
+
+	if p := m.startIn("", false, "http", port, "--last"); p.waitExit(t) != 2 || !strings.Contains(p.err.String(), "no subdomain has been used") {
+		t.Errorf("--last without history: %q", p.err)
+	}
+	for _, name := range []string{"first-app", "second-app", "third-app", "fourth-app"} {
+		p := m.start("http", port, "--subdomain", name)
+		p.waitOut(t, "Status: ONLINE")
+		p.cancel()
+		p.waitExit(t)
+	}
+
+	// The menu offers the three most recent, newest first; choosing one
+	// claims that name again.
+	p := m.startIn("4\n", true, "http", port)
+	p.waitOut(t, "Status: ONLINE")
+	out := p.out.String()
+	for _, want := range []string{"Recently used:", "3) fourth-app", "4) third-app", "5) second-app", "http://third-app.tunnel.test"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "first-app") {
+		t.Errorf("more than three recent names offered:\n%s", out)
+	}
+	p.cancel()
+	p.waitExit(t)
+
+	// --last reuses the most recent one (now third-app) without a menu.
+	p = m.startIn("", false, "http", port, "--last")
+	p.waitOut(t, "Status: ONLINE")
+	if !strings.Contains(p.out.String(), "http://third-app.tunnel.test") || strings.Contains(p.out.String(), "Select your tunnel domain") {
+		t.Errorf("--last:\n%s", p.out)
+	}
+	p.cancel()
+	p.waitExit(t)
+
+	if p := m.startIn("", false, "http", port, "--last", "--random"); p.waitExit(t) != 2 {
+		t.Error("--last combined with --random accepted")
+	}
 }
 
 func TestTCPTunnel(t *testing.T) {

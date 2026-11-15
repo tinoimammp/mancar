@@ -108,7 +108,7 @@ func (e Env) withDefaults() Env {
 const usageText = `mancar - expose local services through your own tunnel gateway
 
 Usage:
-  mancar http PORT|HOST:PORT [--subdomain NAME | --random]
+  mancar http PORT|HOST:PORT [--subdomain NAME | --random | --last]
   mancar tcp  PORT|HOST:PORT
   mancar start [NAME...]            start the tunnels saved with "config add-tunnel"
   mancar status                     list running tunnels
