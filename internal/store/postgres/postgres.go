@@ -205,6 +205,175 @@ func (s *Store) AuthenticateAgent(ctx context.Context, token string) (auth.Princ
 	return p, err
 }
 
+// UserInfo summarises a user for the dashboard.
+type UserInfo struct {
+	ID           string
+	Username     string
+	CreatedAt    time.Time
+	ActiveTokens int
+	Domains      int
+}
+
+// ListUsers returns every user with token and hostname counts, by name.
+func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT u.id, u.username, u.created_at,
+		       (SELECT count(*) FROM agent_tokens t WHERE t.user_id = u.id AND t.revoked_at IS NULL),
+		       (SELECT count(*) FROM domains d WHERE d.user_id = u.id)
+		FROM users u ORDER BY u.username`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserInfo
+	for rows.Next() {
+		var u UserInfo
+		if err := rows.Scan(&u.ID, &u.Username, &u.CreatedAt, &u.ActiveTokens, &u.Domains); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// DeleteUser removes a user and, by cascade, their tokens and hostnames.
+func (s *Store) DeleteUser(ctx context.Context, id string) error {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id::text = $1`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DomainInfo describes a hostname reservation.
+type DomainInfo struct {
+	Hostname  string
+	Username  string
+	Kind      string
+	Online    bool
+	HoldUntil time.Time
+}
+
+// ListDomains returns every reserved hostname, by name.
+func (s *Store) ListDomains(ctx context.Context) ([]DomainInfo, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT d.hostname, u.username, d.kind, d.active_tunnel_id IS NOT NULL, d.hold_until
+		FROM domains d JOIN users u ON u.id = d.user_id ORDER BY d.hostname`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DomainInfo
+	for rows.Next() {
+		var d DomainInfo
+		if err := rows.Scan(&d.Hostname, &d.Username, &d.Kind, &d.Online, &d.HoldUntil); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ReleaseDomain deletes a reservation that has no connected tunnel, making
+// the name available to anyone at once.
+func (s *Store) ReleaseDomain(ctx context.Context, hostname string) error {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM domains WHERE hostname = $1 AND active_tunnel_id IS NULL`, hostname)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ---- dashboard admins ---------------------------------------------------
+
+// Admin is a dashboard operator account.
+type Admin struct {
+	ID                string
+	Username          string
+	PasswordHash      string
+	PasswordChangedAt time.Time
+	LastLoginAt       *time.Time
+	CreatedAt         time.Time
+}
+
+const adminCols = `id, username, password_hash, password_changed_at, last_login_at, created_at`
+
+func scanAdmin(row interface{ Scan(...any) error }) (Admin, error) {
+	var a Admin
+	var last sql.NullTime
+	err := row.Scan(&a.ID, &a.Username, &a.PasswordHash, &a.PasswordChangedAt, &last, &a.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Admin{}, ErrNotFound
+	}
+	if last.Valid {
+		a.LastLoginAt = &last.Time
+	}
+	return a, err
+}
+
+// SetAdmin creates an admin or replaces the password of an existing one.
+// Changing the password invalidates that admin's existing sessions.
+func (s *Store) SetAdmin(ctx context.Context, username, passwordHash string) (created bool, err error) {
+	err = s.DB.QueryRowContext(ctx, `
+		INSERT INTO admins (username, password_hash) VALUES ($1, $2)
+		ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_changed_at = now()
+		RETURNING xmax = 0`, strings.ToLower(strings.TrimSpace(username)), passwordHash).Scan(&created)
+	return created, err
+}
+
+// AdminByUsername looks an admin up for login.
+func (s *Store) AdminByUsername(ctx context.Context, username string) (Admin, error) {
+	return scanAdmin(s.DB.QueryRowContext(ctx, `SELECT `+adminCols+` FROM admins WHERE username = $1`,
+		strings.ToLower(strings.TrimSpace(username))))
+}
+
+// AdminByID looks an admin up for session validation.
+func (s *Store) AdminByID(ctx context.Context, id string) (Admin, error) {
+	return scanAdmin(s.DB.QueryRowContext(ctx, `SELECT `+adminCols+` FROM admins WHERE id::text = $1`, id))
+}
+
+// TouchAdminLogin records a successful login.
+func (s *Store) TouchAdminLogin(ctx context.Context, id string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE admins SET last_login_at = now() WHERE id::text = $1`, id)
+	return err
+}
+
+// ListAdmins returns every admin, by name.
+func (s *Store) ListAdmins(ctx context.Context) ([]Admin, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+adminCols+` FROM admins ORDER BY username`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Admin
+	for rows.Next() {
+		a, err := scanAdmin(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAdmin removes an admin by username.
+func (s *Store) DeleteAdmin(ctx context.Context, username string) error {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM admins WHERE username = $1`, strings.ToLower(strings.TrimSpace(username)))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ---- domain.Registry ---------------------------------------------------
 
 // Claim implements domain.Registry with a single atomic statement: the

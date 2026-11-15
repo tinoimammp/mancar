@@ -137,7 +137,7 @@ func TestMigrate_CreatesSchemaAndIsIdempotent(t *testing.T) {
 			t.Fatalf("Migrate run %d: %v", i+1, err)
 		}
 	}
-	for _, table := range []string{"users", "agent_tokens", "domains", "schema_migrations"} {
+	for _, table := range []string{"users", "agent_tokens", "domains", "admins", "schema_migrations"} {
 		if n := count(t, st, `SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1`, table); n != 1 {
 			t.Errorf("table %s missing", table)
 		}
@@ -559,4 +559,79 @@ func TestSchemaConstraints(t *testing.T) {
 			t.Error("orphan domain accepted")
 		}
 	})
+}
+
+func TestAdmins_SetLookupResetDelete(t *testing.T) {
+	st := newStore(t, true)
+	ctx := context.Background()
+	created, err := st.SetAdmin(ctx, " Root ", "hash1")
+	if err != nil || !created {
+		t.Fatalf("SetAdmin create: created=%v err=%v", created, err)
+	}
+	a, err := st.AdminByUsername(ctx, "root")
+	if err != nil || a.PasswordHash != "hash1" || a.LastLoginAt != nil {
+		t.Fatalf("AdminByUsername: %+v %v", a, err)
+	}
+	if b, err := st.AdminByID(ctx, a.ID); err != nil || b.Username != "root" {
+		t.Fatalf("AdminByID: %+v %v", b, err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	created, err = st.SetAdmin(ctx, "root", "hash2")
+	if err != nil || created {
+		t.Fatalf("SetAdmin reset: created=%v err=%v", created, err)
+	}
+	b, _ := st.AdminByID(ctx, a.ID)
+	if b.PasswordHash != "hash2" || !b.PasswordChangedAt.After(a.PasswordChangedAt) {
+		t.Errorf("reset did not update hash and password_changed_at: %+v", b)
+	}
+	if err := st.TouchAdminLogin(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if list, err := st.ListAdmins(ctx); err != nil || len(list) != 1 || list[0].LastLoginAt == nil {
+		t.Errorf("ListAdmins: %+v %v", list, err)
+	}
+	if err := st.DeleteAdmin(ctx, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdminByID(ctx, a.ID); !errors.Is(err, postgres.ErrNotFound) {
+		t.Errorf("deleted admin still found: %v", err)
+	}
+	if err := st.DeleteAdmin(ctx, "root"); !errors.Is(err, postgres.ErrNotFound) {
+		t.Errorf("second delete: %v", err)
+	}
+}
+
+func TestUsersAndDomainsListing(t *testing.T) {
+	st := newStore(t, true)
+	ctx := context.Background()
+	uid, _ := st.EnsureUser(ctx, "alice")
+	if _, _, err := st.CreateAgentToken(ctx, uid, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Claim(ctx, domain.Claim{Hostname: "api.example.com", OwnerID: uid, Kind: "custom", TunnelID: "t1"}); err != nil {
+		t.Fatal(err)
+	}
+	users, err := st.ListUsers(ctx)
+	if err != nil || len(users) != 1 || users[0].ActiveTokens != 1 || users[0].Domains != 1 {
+		t.Fatalf("ListUsers: %+v %v", users, err)
+	}
+	doms, err := st.ListDomains(ctx)
+	if err != nil || len(doms) != 1 || !doms[0].Online || doms[0].Username != "alice" {
+		t.Fatalf("ListDomains: %+v %v", doms, err)
+	}
+	if err := st.ReleaseDomain(ctx, "api.example.com"); !errors.Is(err, postgres.ErrNotFound) {
+		t.Errorf("released a hostname with a live tunnel: %v", err)
+	}
+	if err := st.Release(ctx, "api.example.com", "t1", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReleaseDomain(ctx, "api.example.com"); err != nil {
+		t.Errorf("ReleaseDomain of a held name: %v", err)
+	}
+	if err := st.DeleteUser(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, st, `SELECT count(*) FROM agent_tokens`); n != 0 {
+		t.Errorf("tokens not cascaded on user delete: %d", n)
+	}
 }
