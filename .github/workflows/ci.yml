@@ -1,9 +1,19 @@
 name: CI
 
+# Documentation-only changes skip CI. A commit that touches code as well as
+# docs still runs everything.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
 
 permissions:
   contents: read
