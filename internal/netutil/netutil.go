@@ -17,24 +17,26 @@ import (
 // half-close so request/response protocols finish properly; any error tears
 // both connections down immediately. io.Copy uses a fixed 32 KiB buffer, and
 // together with yamux flow control this gives end-to-end backpressure
-// without unbounded buffering.
-func Pipe(a, b net.Conn) {
+// without unbounded buffering. It returns the bytes copied in each direction.
+func Pipe(a, b net.Conn) (aToB, bToA int64) {
 	var wg sync.WaitGroup
 	var once sync.Once
 	closeBoth := func() { once.Do(func() { a.Close(); b.Close() }) }
-	cp := func(dst, src net.Conn) {
+	cp := func(dst, src net.Conn, n *int64) {
 		defer wg.Done()
-		if _, err := io.Copy(dst, src); err != nil {
+		var err error
+		if *n, err = io.Copy(dst, src); err != nil {
 			closeBoth()
 			return
 		}
 		closeWrite(dst)
 	}
 	wg.Add(2)
-	go cp(a, b)
-	go cp(b, a)
+	go cp(a, b, &bToA)
+	go cp(b, a, &aToB)
 	wg.Wait()
 	closeBoth()
+	return aToB, bToA
 }
 
 func closeWrite(c net.Conn) {

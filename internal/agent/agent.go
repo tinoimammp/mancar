@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -51,7 +52,10 @@ type Options struct {
 	Token    string
 	Tunnels  []TunnelSpec
 
-	OnStatus   func(Status) // called on every state change
+	OnStatus func(Status) // called on every state change
+	// OnEvent, when set, receives the gateway's report of every finished
+	// request (HTTP) or connection (TCP): the request log.
+	OnEvent    func(TunnelSpec, protocol.Event)
 	Logger     *slog.Logger
 	TLSConfig  *tls.Config
 	KeepAlive  time.Duration
@@ -241,6 +245,9 @@ func (a *Agent) connect(ctx context.Context) (*yamux.Session, error) {
 	req.Header.Set("Authorization", "Bearer "+a.opts.Token)
 	req.Header.Set(protocol.HeaderInstance, a.instance)
 	req.Header.Set(protocol.HeaderAgentVersion, version.Version)
+	if a.opts.OnEvent != nil {
+		req.Header.Set(protocol.HeaderFeatures, protocol.FeatureEvents)
+	}
 	req.Header.Set("User-Agent", "mancar-agent/"+version.Version)
 	if err := req.Write(conn); err != nil {
 		conn.Close()
@@ -371,6 +378,14 @@ func (a *Agent) handleStream(st net.Conn, tunnels map[string]TunnelSpec) {
 		st.Close()
 		return
 	}
+	if hdr.Kind == protocol.StreamKindEvents {
+		a.readEvents(st, tunnels)
+		return
+	}
+	if hdr.Kind != "" {
+		st.Close() // a stream kind this agent does not know
+		return
+	}
 	spec, ok := tunnels[hdr.TunnelID]
 	if !ok {
 		st.Close() // never forward a stream for a tunnel we did not register
@@ -394,4 +409,24 @@ func (a *Agent) handleStream(st net.Conn, tunnels map[string]TunnelSpec) {
 		return
 	}
 	netutil.Pipe(st, local)
+}
+
+// readEvents delivers request-log events until the stream ends. Events for
+// tunnels this agent did not register are ignored.
+func (a *Agent) readEvents(st net.Conn, tunnels map[string]TunnelSpec) {
+	defer st.Close()
+	if a.opts.OnEvent == nil {
+		return
+	}
+	sc := bufio.NewScanner(st)
+	sc.Buffer(make([]byte, 0, 4096), protocol.MaxLineBytes)
+	for sc.Scan() {
+		var ev protocol.Event
+		if json.Unmarshal(sc.Bytes(), &ev) != nil {
+			continue
+		}
+		if spec, ok := tunnels[ev.TunnelID]; ok {
+			a.opts.OnEvent(spec, ev)
+		}
+	}
 }

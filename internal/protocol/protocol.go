@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 const (
@@ -29,6 +30,12 @@ const (
 	HeaderInstance = "X-Mancar-Instance"
 	// HeaderAgentVersion carries the agent build version (informational).
 	HeaderAgentVersion = "X-Mancar-Agent-Version"
+	// HeaderFeatures lists optional features the agent supports
+	// (comma-separated). Gateways ignore features they do not know, and only
+	// use a feature the agent announced, so either side can be older.
+	HeaderFeatures = "X-Mancar-Features"
+	// FeatureEvents: the agent accepts an events stream (request log).
+	FeatureEvents = "events"
 
 	// MaxLineBytes bounds every control message and stream header.
 	MaxLineBytes = 64 * 1024
@@ -104,6 +111,27 @@ func (e *Error) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message)
 type StreamHeader struct {
 	TunnelID   string `json:"tunnel_id"`
 	RemoteAddr string `json:"remote_addr,omitempty"`
+	// Kind is empty for a proxied connection. StreamKindEvents marks the
+	// single stream that carries Event lines to an agent announcing
+	// FeatureEvents.
+	Kind string `json:"kind,omitempty"`
+}
+
+// StreamKindEvents is the StreamHeader.Kind of the events stream.
+const StreamKindEvents = "events"
+
+// Event reports one finished exchange on a tunnel, for the agent's request
+// log. For HTTP it is one request; for TCP one connection.
+type Event struct {
+	TunnelID   string    `json:"tunnel_id"`
+	Time       time.Time `json:"time"`
+	Method     string    `json:"method,omitempty"`
+	Path       string    `json:"path,omitempty"` // without the query string
+	Status     int       `json:"status,omitempty"`
+	DurationMs int64     `json:"duration_ms"`
+	BytesIn    int64     `json:"bytes_in"`  // from the public client
+	BytesOut   int64     `json:"bytes_out"` // to the public client
+	Remote     string    `json:"remote,omitempty"`
 }
 
 // ErrLineTooLong is returned when a peer exceeds MaxLineBytes.
