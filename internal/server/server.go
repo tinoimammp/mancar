@@ -15,6 +15,7 @@ import (
 
 	"github.com/tinoimammp/mancar/internal/auth"
 	"github.com/tinoimammp/mancar/internal/config"
+	"github.com/tinoimammp/mancar/internal/dashboard"
 	"github.com/tinoimammp/mancar/internal/domain"
 	"github.com/tinoimammp/mancar/internal/gateway"
 	"github.com/tinoimammp/mancar/internal/netutil"
@@ -30,7 +31,9 @@ type Deps struct {
 	Registry domain.Registry
 	// HealthCheck verifies backing services (database); may be nil.
 	HealthCheck func(ctx context.Context) error
-	Logger      *slog.Logger
+	// Admin backs the web dashboard; nil disables it (in-memory mode).
+	Admin  dashboard.Store
+	Logger *slog.Logger
 	// TCPBindHost overrides the TCP tunnel bind address (tests use 127.0.0.1).
 	TCPBindHost string
 	// KeepAlive overrides the session heartbeat interval (tests).
@@ -101,6 +104,15 @@ func New(d Deps) *Server {
 			Status string `json:"status"`
 		}{h.Status})
 	})
+	dash := dashboard.New(dashboard.Options{
+		Store: d.Admin, Hub: hub, SessionSecret: cfg.JWTSecret, Secure: cfg.PublicScheme == "https",
+		BaseDomain: cfg.BaseDomain, PublicScheme: cfg.PublicScheme, PublicPort: cfg.PublicPort,
+		TCPPortMin: cfg.TCPPortMin, TCPPortMax: cfg.TCPPortMax, TrustedProxies: cfg.TrustedProxies,
+		HealthCheck: d.HealthCheck, Logger: d.Logger,
+	})
+	mgmt.Handle("/dashboard", dash)
+	mgmt.Handle("/dashboard/", dash)
+	mgmt.Handle("/api/v1/admin/", dash)
 	mgmt.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("mancar gateway\n"))

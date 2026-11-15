@@ -32,9 +32,9 @@ type Config struct {
 	DatabaseURL   string
 	DevAgentToken string
 
-	// JWTSecret and EncryptionKey are validated now so the deployment
-	// contract is stable; they are consumed by the dashboard / management
-	// API milestones (see docs/STATUS.md).
+	// JWTSecret keys the dashboard session cookies. EncryptionKey is
+	// validated now so the deployment contract is stable; no feature uses
+	// it yet (see docs/STATUS.md).
 	JWTSecret     string
 	EncryptionKey []byte
 
