@@ -40,6 +40,41 @@ Resetting a password or deleting an admin signs their sessions out at once.
 Sessions last 12 hours. Every dashboard change is logged as
 `dashboard action` with the admin's name and client address.
 
+## Traffic statistics
+
+The dashboard shows HTTP requests, server errors (5xx or no response) and
+bytes per hostname and per user for the last 24 hours, the last 7 days and
+all time, plus the busiest hostnames on the overview. Counts are kept in
+memory and written every 30 seconds (and on shutdown), in one transaction, to:
+
+| Table | Granularity | Kept |
+|---|---|---|
+| `usage_hourly` | hostname, user, hour | 90 days |
+| `usage_daily` | hostname, user, day (UTC) | forever |
+| `usage_total` | hostname, user | forever |
+
+Purging old hourly rows never changes the daily history or the all-time
+totals. Deleting a user deletes their statistics. TCP tunnels are not counted.
+
+## Request inspector
+
+The dashboard's **Requests** page lists HTTP requests through the tunnels with
+headers, bodies and responses, and can replay them. Settings in `.env`:
+
+| Variable | Default | |
+|---|---|---|
+| `INSPECT` | `on` | `off` stops recording |
+| `INSPECT_RETENTION` | `24h` | captures older than this are deleted (checked every 5 minutes) |
+| `INSPECT_MAX_BODY_BYTES` | `65536` | bytes of each body kept; a longer request cannot be replayed |
+| `INSPECT_MAX_ROWS` | `50000` | oldest captures beyond this are deleted |
+
+Captures are encrypted with `ENCRYPTION_KEY` (AES-256-GCM) before they are
+written; the database only holds the hostname, status, timing and sizes in the
+clear. Recording is asynchronous and never slows traffic: under extreme load
+some captures are dropped (logged as `captures dropped`). WebSocket and TCP
+traffic is not recorded. Replay sends the stored request to the tunnel again,
+so the application processes it a second time.
+
 ## Users and tokens
 
 Users exist implicitly: creating a token for a name creates the user.
@@ -116,10 +151,24 @@ a Compose stack in this repository's CI.
 
 ## Upgrades and rollback
 
+`MANCAR_VERSION` in `.env` chooses the gateway and edge images:
+
+| `MANCAR_VERSION` | Runs |
+|---|---|
+| `latest` (default) | the newest release; every `docker compose up -d` checks for a newer one |
+| `0.3.0` | exactly that release |
+| `0.3` | the newest `0.3.x` patch release |
+
 ```bash
 scripts/backup.sh
-git pull && docker compose up -d --build      # or: set MANCAR_VERSION and docker compose pull
+docker compose up -d          # pulls a newer image if there is one, recreates changed containers
 ```
+
+To move to a specific version, set `MANCAR_VERSION=0.3.0` and run the same
+command; to go back, set the previous version (and see below). Behind nginx,
+add `-f docker-compose.yml -f docker-compose.nginx.yml` as usual.
+`MANCAR_PULL_POLICY=missing` stops `up` from contacting the registry when the
+image is already present.
 
 Migrations run automatically when the gateway starts. They only move forward, so
 **rollback means restoring the pre-upgrade backup** together with the previous
@@ -169,7 +218,7 @@ There is no metrics endpoint yet. Until there is, watch:
 | `POSTGRES_PASSWORD` | `docker compose exec postgres psql -U mancar -c "ALTER USER mancar PASSWORD '<new>'"`, update `.env`, `docker compose up -d gateway` |
 | Agent tokens | Create new, distribute, revoke old (see above) |
 | `JWT_SECRET` | Signs dashboard sessions. Changing it and restarting the gateway signs every admin out; nothing else is affected |
-| `ENCRYPTION_KEY` | Validated at start-up but **not used by any feature yet**. Nothing is encrypted with it today |
+| `ENCRYPTION_KEY` | Encrypts captured requests. Changing it makes existing captures unreadable (the dashboard hides them; they expire with `INSPECT_RETENTION`). Nothing else uses it |
 
 ## Moving to a new server
 

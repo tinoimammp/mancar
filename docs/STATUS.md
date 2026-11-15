@@ -21,13 +21,13 @@ environment (see the note) · ❌ not implemented.
 | Automatic certificates and renewal | ⚠️ | Delegated to Caddy; the wildcard flow is tested with an internal CA, **not with a real issuer** |
 | Multiple simultaneous tunnels | ✅ | Up to 10 per agent connection, many agents |
 | Persistent connections, reconnect | ✅ | Backoff 1 s → 30 s with jitter; a gateway restart is survived in about 2.5 s; random names survive reconnects |
-| Traffic inspection, request replay | ❌ | |
+| Traffic inspection, request replay | ✅ | Dashboard **Requests** page: headers, bodies (first 64 KiB), responses, replay, copy as curl. Stored AES-256-GCM encrypted in PostgreSQL, deleted after `INSPECT_RETENTION`. HTTP only, not WebSocket frames or TCP |
 | Authentication policies (basic auth, OAuth), IP allow/deny | ❌ | Only agent-token authentication exists |
 | Rate limiting | ⚠️ | Only failed agent logins per client address. No per-tunnel or per-IP limit on public traffic |
 | Request size and connection limits | ✅ | |
 | Management REST API (OpenAPI) | ❌ | Only `/healthz` and `/api/v1/system/health`. Tokens are managed with `mancard token ...` |
 | Web dashboard | ✅ | `/dashboard/`: live agents and tunnels, disconnect, users, tokens (create, revoke with immediate disconnect), hostname reservations. Needs PostgreSQL storage |
-| Access logs | ⚠️ | One structured log line per public request; no stored traffic log |
+| Access logs | ✅ | One structured log line per public request on the gateway; a live request log in the client terminal; per-hostname statistics (hourly for 90 days, daily and all-time forever) and the encrypted request inspector in the dashboard |
 | Docker self-hosting | ⚠️ | Compose file validated with the real Compose v2 binary; **images not built in the authoring environment** (no Docker there). CI builds them |
 
 ## Advanced
@@ -54,7 +54,7 @@ Details and gaps: [SECURITY.md](SECURITY.md).
 
 ## Database
 
-Implemented: `users`, `agent_tokens`, `domains`, `admins` (UUID keys, foreign keys with
+Implemented: `users`, `agent_tokens`, `domains`, `admins`, `captured_requests`, `usage_hourly`, `usage_daily`, `usage_total` (UUID keys, foreign keys with
 cascade, unique constraints, check constraints, indexes, versioned atomic
 migrations, advisory-locked so parallel starts are safe).
 Not yet: `agents`, `tunnels` (history), `certificates`, `api_keys`,

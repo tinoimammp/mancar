@@ -53,7 +53,22 @@ internet ──▶ Caddy (TLS) ──▶ gateway ──▶ agent ──▶ local
   all server data as text, never as HTML.
 * Agent token secrets are shown once at creation and never stored.
 
-`ENCRYPTION_KEY` is validated at start-up but not used by any feature yet.
+### Request inspector
+
+Captured requests contain whatever users send through their tunnels:
+passwords, cookies, tokens. They are therefore:
+
+* encrypted before storage with AES-256-GCM under `ENCRYPTION_KEY`, with the
+  row ID as associated data (a ciphertext cannot be moved to another row).
+  Method, URL, headers, bodies and client address are all inside the
+  ciphertext; hostname, status, timing and sizes are stored in the clear;
+* decrypted only in the gateway, for a logged-in admin;
+* deleted automatically after `INSPECT_RETENTION` (default 24 h) and beyond
+  `INSPECT_MAX_ROWS`, and when their user is deleted;
+* visible to every dashboard admin (there are no per-user views yet).
+
+Set `INSPECT=off` if admins must not see tunnel traffic. A database dump
+without `ENCRYPTION_KEY` does not reveal captured content.
 
 ## Isolation between users
 

@@ -17,6 +17,7 @@ Upgrade: mancar/1
 Authorization: Bearer mc_<64 characters>
 X-Mancar-Instance: <16 hex>          identifies this agent process across reconnects
 X-Mancar-Agent-Version: <version>    informational
+X-Mancar-Features: events            optional features the agent supports
 ```
 
 | Status | Meaning | Agent behaviour |
@@ -87,6 +88,28 @@ connections. If the local service is unreachable, HTTP tunnels get
 HTTP tunnels carry the HTTP/1.1 conversation unchanged (including WebSocket
 upgrades and streaming responses); TCP tunnels carry the raw byte stream.
 Half-close is propagated, so request/response protocols complete correctly.
+
+## 4a. Events stream (request log)
+
+An agent that sends `X-Mancar-Features: events` may receive one extra stream,
+opened by the gateway when the first event occurs, with the header
+
+```json
+{"kind":"events"}
+```
+
+followed by one JSON line per finished exchange on the agent's tunnels:
+
+```json
+{"tunnel_id":"...","time":"2026-11-15T14:02:11Z","method":"GET","path":"/api/users","status":200,"duration_ms":12,"bytes_in":0,"bytes_out":512,"remote":"203.0.113.9"}
+```
+
+HTTP tunnels report every request (the path never includes the query
+string); TCP tunnels report every connection when it closes (`method`, `path`
+and `status` are absent). Delivery is best effort: the gateway drops events
+rather than slow traffic down. Agents ignore streams with an unknown `kind`,
+and gateways only open this stream for agents that asked for it, so mixed
+versions keep working.
 
 ## 5. Limits
 

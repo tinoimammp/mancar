@@ -1,158 +1,242 @@
 # mancar
 
-A self-hosted tunnelling platform: expose a service on your laptop to the
-internet through **your own server and your own domain**, with automatic HTTPS.
-No third-party tunnelling provider is involved.
+Self-hosted tunnels: put a service running on your laptop on the internet
+through **your own server and your own domain**, with automatic HTTPS. Like
+ngrok, but you run it.
 
 ```text
 $ mancar http 3000 --subdomain my-api
 
-Tunnel established.
-
 Forwarding:
-https://my-api.mydomain.com
-    -> http://localhost:3000
-
-Status: ONLINE
-Protocol: HTTP
-TLS: ENABLED
+https://my-api.example.com  ->  http://localhost:3000
 ```
 
-> **Status: early but real.** The core (HTTP, WebSocket and TCP tunnels, custom
-> and random subdomains, per-user tokens, PostgreSQL, Docker deployment) is
-> implemented and tested. Much of what makes ngrok *ngrok* (dashboard, traffic
-> inspector, auth policies, custom domains, UDP, ...) is **not built yet**.
-> Read [docs/STATUS.md](docs/STATUS.md) for the exact, honest list before you
-> depend on this.
+There are two programs:
 
-## How it works
+| Program | Runs on | What it does |
+|---|---|---|
+| `mancard` | your server (Docker) | the gateway: receives public traffic and the web dashboard |
+| `mancar` | your laptop | the client: connects to the gateway and forwards to `localhost` |
 
-```text
- public client ──HTTPS──▶ ┌────────┐      ┌─────────────┐      ┌──────────┐
- (browser, curl)          │ Caddy  │─────▶│  mancard  │─────▶│ Postgres │
-                          │  edge  │ HTTP │  (gateway)  │      └──────────┘
- mancar agent ─HTTPS──▶ └────────┘      └──────┬──────┘
- (your laptop)   upgrade     TLS, wildcard cert  │ one multiplexed connection per agent
-        ▲                                        ▼
-        └──────────── requests are streamed back to the agent, which dials
-                      only the local address you configured
-```
+## Features
 
-* The **agent** (`mancar`) opens one outbound, authenticated connection to the
-  gateway. Nothing on your machine listens for the internet.
-* The **gateway** (`mancard`) maps `name.yourdomain.com` to the agent that owns
-  it and streams requests through that connection. Hostname ownership is decided
-  atomically in PostgreSQL, never by DNS lookups.
-* The **edge** (Caddy) terminates TLS with a wildcard certificate obtained
-  automatically through the Cloudflare DNS API.
+| Area | Feature | Status |
+|---|---|---|
+| Tunnels | HTTP / HTTPS tunnels | ✅ |
+| | WebSocket and streaming responses (SSE, long polling) | ✅ |
+| | Raw TCP tunnels (databases, SSH, game servers) | ✅ |
+| | Custom (`my-api`) or random (`blue-falcon`) subdomains | ✅ |
+| | Several tunnels per client, saved and started together | ✅ |
+| | Live request log in the client terminal (method, path, status, time) | ✅ |
+| | Automatic reconnect, same public address afterwards | ✅ |
+| | `mancar update`: self-update with checksum verification | ✅ |
+| | UDP tunnels | ❌ |
+| | Your own domains (not just subdomains of `BASE_DOMAIN`) | ❌ |
+| Server | Automatic wildcard HTTPS (Let's Encrypt via Cloudflare DNS) | ✅ |
+| | Standalone (bundled Caddy) or behind an existing nginx | ✅ |
+| | Docker Compose deployment, PostgreSQL with automatic migrations | ✅ |
+| | Backup / restore scripts, health checks, JSON logs | ✅ |
+| Dashboard | Live clients and tunnels, disconnect a client | ✅ |
+| | Create and revoke tokens (revoke disconnects at once) | ✅ |
+| | Manage users and reserved hostnames | ✅ |
+| | Traffic per hostname and user: 24 h, 7 days and all time (requests, errors, bytes) | ✅ |
+| | Request inspector and replay (stored encrypted, auto-deleted) | ✅ |
+| Security | Per-user tokens, stored only as hashes | ✅ |
+| | Isolation: users cannot take over each other's hostnames | ✅ |
+| | Limits on tunnels, connections, request size; failed-login lockout | ✅ |
+| | Dashboard: hashed passwords, signed cookies, CSRF protection, strict CSP | ✅ |
+| | Basic auth / OAuth / IP rules in front of a tunnel | ❌ |
 
-Design details: [docs/adr](docs/adr), wire protocol: [docs/protocol.md](docs/protocol.md).
+✅ available · ❌ not yet. Details: [docs/STATUS.md](docs/STATUS.md).
 
-## Requirements
+---
 
-* A VPS with a public IPv4 address and Docker with the Compose plugin
-* A registered domain whose DNS is managed by **Cloudflare**
-* Ports **80**, **443** (TCP and UDP) and the TCP-tunnel range (default
-  20000-20099) reachable from the internet
+## Run as server
 
-## Install the server
+### What you need
+
+- A VPS with a public IP, Docker and the Compose plugin
+- A domain on **Cloudflare** DNS, and a Cloudflare API token with only
+  *Zone / DNS / Edit* on that zone
+- Open ports: **80**, **443** and **20000-20099** (TCP tunnels)
+
+### 1. DNS
+
+In Cloudflare, add two records pointing at the server, **DNS only** (grey
+cloud, not proxied):
+
+| Type | Name | Value |
+|---|---|---|
+| A | `@` | server IP |
+| A | `*` | server IP |
+
+Using a subdomain such as `tunnel.example.com` instead? The names are `tunnel`
+and `*.tunnel`.
+
+### 2. Configure
 
 ```bash
 git clone https://github.com/tinoimammp/mancar.git
 cd mancar
 cp .env.example .env
-./scripts/setup.sh        # generates the three secrets, once
-nano .env                 # fill in BASE_DOMAIN, ACME_EMAIL, CLOUDFLARE_API_TOKEN
+./scripts/setup.sh     # generates the secrets
+nano .env              # set BASE_DOMAIN, ACME_EMAIL, CLOUDFLARE_API_TOKEN
+```
+
+`MANCAR_VERSION` picks the release: `latest` (the default) always runs the
+newest one, or pin a version such as `0.3.0`.
+
+### 3. Start
+
+```bash
 docker compose up -d
 ```
 
-Before the first start, create these two DNS records in Cloudflare, **DNS only**
-(grey cloud, *not* proxied; see [why](docs/DEPLOYMENT.md#why-dns-only)):
+> **nginx already uses ports 80/443 on this server?** Don't run the command
+> above; follow [docs/NGINX.md](docs/NGINX.md) instead. Your other sites keep
+> working.
 
-```text
-A   @   <your VPS public IP>
-A   *   <your VPS public IP>
-```
-
-Then create a token for a user and hand it to them:
-
-```bash
-docker compose exec gateway /mancard token create --user alice --name laptop
-```
-
-Or use the web dashboard at `https://mydomain.com/dashboard/`. Create an admin
-account first (a strong password is generated and shown once):
+### 4. Create a dashboard admin
 
 ```bash
 docker compose exec gateway /mancard admin set --user admin
 ```
 
-Already running nginx on ports 80/443? See [docs/NGINX.md](docs/NGINX.md).
+The password is printed once. Open `https://YOUR_DOMAIN/dashboard/` and log in.
 
-Step-by-step with troubleshooting: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+### 5. Give someone access
 
-## Use the client
-
-Download `mancar` for your platform from the releases page (or `make build`).
+In the dashboard: **Tokens → New token**. Copy the token (it is shown once)
+and send it to the person who will run the client. From the command line:
 
 ```bash
-mancar config set server https://mydomain.com
-mancar config set token -        # paste the token, then Ctrl+D (keeps it out of shell history)
+docker compose exec gateway /mancard token create --user alice --name laptop
+```
 
-mancar http 3000                      # prompts: random or custom subdomain
-mancar http 3000 --subdomain my-api   # non-interactive, custom
-mancar http 8080 --random             # non-interactive, random
-mancar tcp 5432                       # raw TCP, e.g. PostgreSQL
+### Updating the server
 
-mancar config add-tunnel web http 3000 --subdomain my-api
-mancar config add-tunnel db  tcp  5432
-mancar start                          # all saved tunnels at once
+```bash
+docker compose up -d     # with MANCAR_VERSION=latest this pulls the newest release
+```
 
-mancar status                         # what is running
-mancar stop                           # stop everything (or: stop PID)
+To run a specific version, set `MANCAR_VERSION=0.3.0` in `.env` and run the
+same command. Take a backup first (`scripts/backup.sh`).
+
+More: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) (troubleshooting) and
+[docs/OPERATIONS.md](docs/OPERATIONS.md) (backups, upgrades, logs).
+
+---
+
+## Run as client
+
+### 1. Install
+
+Download `mancar` from the
+[latest release](https://github.com/tinoimammp/mancar/releases/latest):
+
+| System | File |
+|---|---|
+| macOS, Apple Silicon | `mancar-<version>-darwin-arm64` |
+| macOS, Intel | `mancar-<version>-darwin-amd64` |
+| Linux | `mancar-<version>-linux-amd64` (or `-arm64`) |
+| Windows | `mancar-<version>-windows-amd64.exe` |
+
+macOS / Linux:
+
+```bash
+curl -fL -o /tmp/mancar https://github.com/tinoimammp/mancar/releases/download/v0.2.0/mancar-v0.2.0-darwin-arm64
+chmod +x /tmp/mancar
+sudo mv /tmp/mancar /usr/local/bin/mancar
 mancar version
 ```
 
-If a custom name is taken, an interactive session asks for another one; a
-non-interactive one fails with a clear message. A disconnected agent keeps its
-name reserved for you (24 h for custom names, 5 min for random ones) so a
-reconnect gets the same address.
+Later, update to the newest release with:
 
-## What you get today
+```bash
+mancar update            # or: sudo mancar update, if installed in /usr/local/bin
+mancar update --check    # only check
+```
 
-* HTTP/HTTPS tunnels, including WebSocket and streaming responses
-* TCP tunnels on a configurable public port range
-* Random (`blue-falcon`) and custom subdomains with atomic reservation
-* Per-user agent tokens (stored only as hashes), revocable instantly
-* Web dashboard: live agents and tunnels, token, user and hostname management
-* Automatic reconnect with backoff; the public address survives reconnects
-* Limits on tunnels, agents, connections and request size; failed-login rate limiting
-* Structured JSON logs, health checks, graceful shutdown
-* PostgreSQL with versioned, atomic migrations; backup and restore scripts
+The download is verified against the release's `SHA256SUMS` before it
+replaces the binary. When a newer release exists, every `mancar` command
+prints a one-line notice; running tunnels look for one once a day and
+`mancar version` checks right away. `MANCAR_NO_UPDATE_CHECK=1` turns this off.
+
+### 2. Connect to your server
+
+```bash
+mancar config set server https://YOUR_DOMAIN
+mancar config set token -     # paste the token, press Enter, then Ctrl+D
+```
+
+### 3. Open a tunnel
+
+```bash
+mancar http 3000 --subdomain my-api   # https://my-api.YOUR_DOMAIN -> localhost:3000
+mancar http 3000 --random             # random name, e.g. blue-falcon
+mancar http 3000                      # asks which one you want
+mancar tcp 5432                       # raw TCP, e.g. a database -> YOUR_DOMAIN:200xx
+```
+
+While it runs, every request is printed:
+
+```text
+Requests
+--------
+14:02:11  GET    /api/users                               200 OK                   12 ms
+14:02:13  POST   /api/login                               401 Unauthorized         8 ms
+```
+
+Add `--quiet` to hide the log. Stop with Ctrl+C. If the connection drops, the
+client reconnects and keeps the same address.
+
+### Save tunnels and run them together
+
+```bash
+mancar config add-tunnel web http 3000 --subdomain my-api
+mancar config add-tunnel db  tcp  5432
+mancar start      # start all saved tunnels
+mancar status     # what is running
+mancar stop       # stop everything
+```
+
+---
+
+## How it works
+
+```text
+ visitor ──HTTPS──▶ edge (TLS) ──▶ mancard (gateway) ◀── one connection ── mancar (laptop) ──▶ localhost:3000
+                                        │
+                                    PostgreSQL
+```
+
+The client opens one outbound connection to the gateway, so nothing on your
+laptop listens for the internet. The gateway maps `name.YOUR_DOMAIN` to the
+client that owns it and streams each request through that connection. TLS is
+handled by the bundled Caddy edge (wildcard certificate via Cloudflare DNS) or
+by your own nginx.
 
 ## Documentation
 
 | | |
 |---|---|
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | DNS, Cloudflare token, firewall, first start, troubleshooting |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Tokens, backups, upgrades, logs, monitoring, limits |
-| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, what is and is not protected, hardening |
-| [docs/protocol.md](docs/protocol.md) | Agent/gateway wire protocol |
-| [docs/STATUS.md](docs/STATUS.md) | Feature-by-feature status and test evidence |
-| [docs/adr](docs/adr) | Architecture decisions |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Server setup in detail, troubleshooting |
+| [docs/NGINX.md](docs/NGINX.md) | Running behind an existing nginx |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Dashboard admins, tokens, backups, upgrades, logs |
+| [docs/SECURITY.md](docs/SECURITY.md) | What is and is not protected |
+| [docs/STATUS.md](docs/STATUS.md) | Feature-by-feature status |
+| [docs/protocol.md](docs/protocol.md), [docs/adr](docs/adr) | Protocol and design decisions |
 
 ## Development
 
 ```bash
-make check            # gofmt, vet, tests with the race detector, shellcheck
-make build            # bin/mancard and bin/mancar
-make dist             # release binaries for all platforms + SHA256SUMS
-make e2e-edge         # real Caddy in front of the real gateway (needs caddy)
+make check     # gofmt, vet, tests with the race detector, shellcheck
+make build     # bin/mancard and bin/mancar
+make dist      # release binaries for all platforms
 ```
 
-PostgreSQL tests run when `TEST_DATABASE_URL` is set (see the `Makefile`). The
-module path in this repository is the placeholder `github.com/tinoimammp/mancar`;
-`scripts/rename-module.sh github.com/you/repo` replaces it everywhere.
+PostgreSQL tests run when `TEST_DATABASE_URL` is set (see the `Makefile`).
+Releases are built by pushing a `v*` tag.
 
 ## License
 
