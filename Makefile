@@ -7,7 +7,7 @@ DIST     := dist
 
 # Set TEST_DATABASE_URL to run the PostgreSQL tests too, for example:
 #   docker run -d --name pgtest -e POSTGRES_USER=mancar -e POSTGRES_PASSWORD=testpw \
-#     -e POSTGRES_DB=mancar_test -p 5432:5432 postgres:16-alpine
+#     -e POSTGRES_DB=mancar_test -p 5432:5432 postgres:18-alpine
 #   export TEST_DATABASE_URL='postgres://mancar:testpw@127.0.0.1:5432/mancar_test?sslmode=disable'
 
 .PHONY: all build test race vet fmt fmt-check check shellcheck e2e-edge dist docker clean

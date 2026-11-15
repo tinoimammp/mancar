@@ -84,7 +84,7 @@ with the feature that needs it.
 | Automated tests | 236 test functions across 14 packages, run with the race detector |
 | Statement coverage | 87.9 % across `internal/...` when all test suites run together |
 | PostgreSQL | Store, migrations, registry contract and token administration tested against PostgreSQL 16 |
-| Edge end-to-end | `scripts/e2e-edge.sh`: real Caddy 2.10.2 with the production Caddyfile → real gateway → real agent → local app. Checks the upgrade handshake over HTTPS, wildcard and apex certificates, forwarded headers and spoofing, streaming, redirect, shutdown, wrong token, brute-force protection. Passed repeatedly |
+| Edge end-to-end | `scripts/e2e-edge.sh`: real Caddy 2.11.9 with the production Caddyfile → real gateway → real agent → local app. Checks the upgrade handshake over HTTPS, wildcard and apex certificates, forwarded headers and spoofing, streaming, redirect, shutdown, wrong token, brute-force protection. Passed repeatedly |
 | Scripts | `setup.sh`, `backup.sh`, `restore.sh`, `rename-module.sh` exercised for real (destroy-and-restore on PostgreSQL included); `shellcheck` clean |
 | Compose file | Rendered and validated with Docker Compose v2.29.7: required-variable errors, published ports, hardening options |
 | CI workflows | Linted with `actionlint` (not executed) |
@@ -93,7 +93,7 @@ with the feature that needs it.
 ## What has not been verified or done
 
 * **Docker images were not built** and `docker compose up` was never run (the authoring environment had no Docker). The CI `docker` job builds both images and validates the Compose file, but nobody has watched a full stack start.
-* **Real certificate issuance** (Let's Encrypt, Cloudflare DNS-01, token permissions, renewal) was not exercised; the Caddy Cloudflare plugin (`caddy-dns/cloudflare@v0.2.4`) was not built. Image tags (`golang:1.24-alpine`, `caddy:2.10.2`, `postgres:16-alpine`) were not checked against the registries.
+* **Real certificate issuance** (Let's Encrypt, Cloudflare DNS-01, token permissions, renewal) was not exercised; the Caddy Cloudflare plugin (`caddy-dns/cloudflare@v0.2.4`) was not built. Image tags (`golang:1.26-alpine`, `caddy:2.11.9`, `postgres:18-alpine`) were not checked against the registries.
 * **No load or performance testing.** Only functional concurrency tests exist (many concurrent requests, large bodies). Do not assume capacity numbers.
 * **No independent security audit** and no penetration test.
 * The macOS and Windows clients were cross-compiled but never run.
