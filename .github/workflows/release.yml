@@ -42,10 +42,30 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make dist VERSION=${{ github.ref_name }}
+      # The release description is this tag's section of CHANGELOG.md; a tag
+      # without one fails here, before anything is published.
+      - name: release notes from CHANGELOG.md
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          awk -v tag="$TAG" '
+            $0 ~ "^## \\[" tag "\\]" { on = 1; next }
+            on && (/^## \[/ || /^\[v/) { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section for $TAG; add '## [$TAG] - date' before tagging"
+            exit 1
+          fi
+          prev=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then
+            printf '\n**Full changelog**: %s/compare/%s...%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$prev" "$TAG" >> notes.md
+          fi
+          cat notes.md
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: notes.md
 
   images:
     needs: test
