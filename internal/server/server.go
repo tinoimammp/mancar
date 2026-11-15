@@ -13,14 +13,14 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/auth"
-	"github.com/USERNAME/mancar/internal/config"
-	"github.com/USERNAME/mancar/internal/domain"
-	"github.com/USERNAME/mancar/internal/gateway"
-	"github.com/USERNAME/mancar/internal/netutil"
-	"github.com/USERNAME/mancar/internal/protocol"
-	"github.com/USERNAME/mancar/internal/router"
-	"github.com/USERNAME/mancar/internal/version"
+	"github.com/tinoimammp/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/config"
+	"github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/gateway"
+	"github.com/tinoimammp/mancar/internal/netutil"
+	"github.com/tinoimammp/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/router"
+	"github.com/tinoimammp/mancar/internal/version"
 )
 
 // Deps are the infrastructure dependencies injected into the server.

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/USERNAME/mancar/internal/gateway"
-	"github.com/USERNAME/mancar/internal/router"
+	"github.com/tinoimammp/mancar/internal/gateway"
+	"github.com/tinoimammp/mancar/internal/router"
 )
 
 // fakeTunnels is a router.Tunnels that records every lookup.

@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/version"
+	"github.com/tinoimammp/mancar/internal/version"
 )
 
 // Env is everything the commands need from the outside world. Tests replace

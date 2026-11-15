@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/USERNAME/mancar/internal/auth"
-	"github.com/USERNAME/mancar/internal/version"
+	"github.com/tinoimammp/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/version"
 )
 
 func TestVersionAndHelp(t *testing.T) {

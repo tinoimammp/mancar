@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/USERNAME/mancar/internal/cli"
+	"github.com/tinoimammp/mancar/internal/cli"
 )
 
 func main() {

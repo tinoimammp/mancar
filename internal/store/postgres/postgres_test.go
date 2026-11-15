@@ -16,11 +16,11 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/auth"
-	"github.com/USERNAME/mancar/internal/domain"
-	"github.com/USERNAME/mancar/internal/domain/domaintest"
-	"github.com/USERNAME/mancar/internal/store/postgres"
-	"github.com/USERNAME/mancar/migrations"
+	"github.com/tinoimammp/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/domain/domaintest"
+	"github.com/tinoimammp/mancar/internal/store/postgres"
+	"github.com/tinoimammp/mancar/migrations"
 )
 
 var (

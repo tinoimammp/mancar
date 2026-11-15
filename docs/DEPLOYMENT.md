@@ -66,7 +66,7 @@ reachable only on the Compose network.
 ## 5. Configure and start
 
 ```bash
-git clone https://github.com/USERNAME/mancar.git && cd mancar
+git clone https://github.com/tinoimammp/mancar.git && cd mancar
 cp .env.example .env
 ./scripts/setup.sh      # generates JWT_SECRET, ENCRYPTION_KEY, POSTGRES_PASSWORD once
 ```

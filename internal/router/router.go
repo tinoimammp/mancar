@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/gateway"
-	"github.com/USERNAME/mancar/internal/netutil"
+	"github.com/tinoimammp/mancar/internal/gateway"
+	"github.com/tinoimammp/mancar/internal/netutil"
 )
 
 // Tunnels is the part of the gateway the router needs.

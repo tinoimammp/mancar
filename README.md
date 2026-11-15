@@ -58,7 +58,7 @@ Design details: [docs/adr](docs/adr), wire protocol: [docs/protocol.md](docs/pro
 ## Install the server
 
 ```bash
-git clone https://github.com/USERNAME/mancar.git
+git clone https://github.com/tinoimammp/mancar.git
 cd mancar
 cp .env.example .env
 ./scripts/setup.sh        # generates the three secrets, once
@@ -141,7 +141,7 @@ make e2e-edge         # real Caddy in front of the real gateway (needs caddy)
 ```
 
 PostgreSQL tests run when `TEST_DATABASE_URL` is set (see the `Makefile`). The
-module path in this repository is the placeholder `github.com/USERNAME/mancar`;
+module path in this repository is the placeholder `github.com/tinoimammp/mancar`;
 `scripts/rename-module.sh github.com/you/repo` replaces it everywhere.
 
 ## License

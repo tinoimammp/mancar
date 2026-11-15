@@ -15,10 +15,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/USERNAME/mancar/internal/agent"
-	"github.com/USERNAME/mancar/internal/auth"
-	"github.com/USERNAME/mancar/internal/domain"
-	"github.com/USERNAME/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/agent"
+	"github.com/tinoimammp/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/protocol"
 )
 
 // fileConfig is the persisted configuration (config.json, mode 0600).

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/USERNAME/mancar/internal/domain"
-	"github.com/USERNAME/mancar/internal/domain/domaintest"
+	. "github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/domain/domaintest"
 )
 
 func TestValidateLabel(t *testing.T) {

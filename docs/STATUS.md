@@ -97,7 +97,7 @@ with the feature that needs it.
 * **No load or performance testing.** Only functional concurrency tests exist (many concurrent requests, large bodies). Do not assume capacity numbers.
 * **No independent security audit** and no penetration test.
 * The macOS and Windows clients were cross-compiled but never run.
-* The placeholder module path `github.com/USERNAME/mancar`, the image names `ghcr.io/username/...` and the MIT licence holder `USERNAME` must be replaced (`scripts/rename-module.sh`).
+* The placeholder module path `github.com/tinoimammp/mancar`, the image names `ghcr.io/tinoimammp/...` and the MIT licence holder `USERNAME` must be replaced (`scripts/rename-module.sh`).
 
 ## Roadmap
 

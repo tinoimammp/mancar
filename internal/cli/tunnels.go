@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/agent"
-	"github.com/USERNAME/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/agent"
+	"github.com/tinoimammp/mancar/internal/protocol"
 )
 
 // cmdTunnel implements "mancar http ..." and "mancar tcp ...".

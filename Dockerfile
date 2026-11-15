@@ -7,7 +7,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath \
-      -ldflags "-s -w -X github.com/USERNAME/mancar/internal/version.Version=${VERSION}" \
+      -ldflags "-s -w -X github.com/tinoimammp/mancar/internal/version.Version=${VERSION}" \
       -o /out/mancard ./cmd/mancard
 
 # distroless/static: no shell, no package manager, runs as an unprivileged user.

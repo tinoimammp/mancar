@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/USERNAME/mancar/internal/agent"
-	"github.com/USERNAME/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/agent"
+	"github.com/tinoimammp/mancar/internal/protocol"
 )
 
 func TestParseLocalAddr(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/agent"
+	"github.com/tinoimammp/mancar/internal/agent"
 )
 
 // Every running agent keeps agent-<pid>.json in the state directory, which

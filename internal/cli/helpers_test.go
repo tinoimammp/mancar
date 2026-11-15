@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/cli"
-	"github.com/USERNAME/mancar/internal/daemon"
+	"github.com/tinoimammp/mancar/internal/cli"
+	"github.com/tinoimammp/mancar/internal/daemon"
 )
 
 const (

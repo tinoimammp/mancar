@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/agent"
-	"github.com/USERNAME/mancar/internal/auth"
-	"github.com/USERNAME/mancar/internal/config"
-	"github.com/USERNAME/mancar/internal/domain"
-	"github.com/USERNAME/mancar/internal/server"
+	"github.com/tinoimammp/mancar/internal/agent"
+	"github.com/tinoimammp/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/config"
+	"github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/server"
 )
 
 const baseDomain = "tunnel.test"

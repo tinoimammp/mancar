@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/USERNAME/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/auth"
 )
 
 // firstTokenID returns the ID column of the first data row of `token list`.

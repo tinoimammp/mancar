@@ -19,8 +19,8 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/USERNAME/mancar/internal/daemon"
-	"github.com/USERNAME/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/daemon"
+	"github.com/tinoimammp/mancar/internal/protocol"
 )
 
 // syncBuf is a goroutine-safe buffer: the daemon logs while tests read.

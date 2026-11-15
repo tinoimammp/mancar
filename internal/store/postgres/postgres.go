@@ -14,8 +14,8 @@ import (
 
 	_ "github.com/lib/pq" // PostgreSQL driver
 
-	"github.com/USERNAME/mancar/internal/auth"
-	"github.com/USERNAME/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/domain"
 )
 
 // Store wraps a connection pool.

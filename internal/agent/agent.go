@@ -29,9 +29,9 @@ import (
 
 	"github.com/hashicorp/yamux"
 
-	"github.com/USERNAME/mancar/internal/netutil"
-	"github.com/USERNAME/mancar/internal/protocol"
-	"github.com/USERNAME/mancar/internal/version"
+	"github.com/tinoimammp/mancar/internal/netutil"
+	"github.com/tinoimammp/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/version"
 )
 
 // TunnelSpec describes one tunnel the agent should maintain.

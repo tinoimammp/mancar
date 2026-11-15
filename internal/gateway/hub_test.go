@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/auth"
-	"github.com/USERNAME/mancar/internal/domain"
-	"github.com/USERNAME/mancar/internal/gateway"
-	"github.com/USERNAME/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/gateway"
+	"github.com/tinoimammp/mancar/internal/protocol"
 )
 
 func newHub(a auth.Authenticator) *gateway.Hub {

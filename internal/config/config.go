@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/auth"
-	"github.com/USERNAME/mancar/internal/netutil"
+	"github.com/tinoimammp/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/netutil"
 )
 
 // Config is the validated gateway configuration.

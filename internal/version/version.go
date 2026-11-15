@@ -3,5 +3,5 @@ package version
 
 // Version is overridden at build time:
 //
-//	go build -ldflags "-X github.com/USERNAME/mancar/internal/version.Version=v0.1.0"
+//	go build -ldflags "-X github.com/tinoimammp/mancar/internal/version.Version=v0.1.0"
 var Version = "dev"

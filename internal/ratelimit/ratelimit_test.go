@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/ratelimit"
+	"github.com/tinoimammp/mancar/internal/ratelimit"
 )
 
 type clock struct {

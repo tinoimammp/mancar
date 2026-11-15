@@ -1,4 +1,4 @@
-module github.com/USERNAME/mancar
+module github.com/tinoimammp/mancar
 
 go 1.26.11
 

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/USERNAME/mancar/internal/domain"
+	. "github.com/tinoimammp/mancar/internal/domain"
 )
 
 // RunRegistryContract exercises the behaviour every Registry implementation

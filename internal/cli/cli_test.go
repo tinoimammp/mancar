@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/version"
+	"github.com/tinoimammp/mancar/internal/version"
 )
 
 func TestVersionHelpAndUnknown(t *testing.T) {

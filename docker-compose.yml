@@ -39,7 +39,7 @@ services:
       context: .
       args:
         VERSION: "${MANCAR_VERSION:-dev}"
-    image: ${MANCAR_IMAGE:-ghcr.io/username/mancar}:${MANCAR_VERSION:-latest}
+    image: ${MANCAR_IMAGE:-ghcr.io/tinoimammp/mancar}:${MANCAR_VERSION:-latest}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -82,7 +82,7 @@ services:
   caddy:
     build:
       context: ./docker/caddy
-    image: ${MANCAR_EDGE_IMAGE:-ghcr.io/username/mancar-edge}:${MANCAR_VERSION:-latest}
+    image: ${MANCAR_EDGE_IMAGE:-ghcr.io/tinoimammp/mancar-edge}:${MANCAR_VERSION:-latest}
     restart: unless-stopped
     depends_on:
       gateway:

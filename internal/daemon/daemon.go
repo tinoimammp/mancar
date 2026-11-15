@@ -23,13 +23,13 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/auth"
-	"github.com/USERNAME/mancar/internal/config"
-	"github.com/USERNAME/mancar/internal/domain"
-	"github.com/USERNAME/mancar/internal/server"
-	"github.com/USERNAME/mancar/internal/store/postgres"
-	"github.com/USERNAME/mancar/internal/version"
-	"github.com/USERNAME/mancar/migrations"
+	"github.com/tinoimammp/mancar/internal/auth"
+	"github.com/tinoimammp/mancar/internal/config"
+	"github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/server"
+	"github.com/tinoimammp/mancar/internal/store/postgres"
+	"github.com/tinoimammp/mancar/internal/version"
+	"github.com/tinoimammp/mancar/migrations"
 )
 
 // Env is everything the commands need from the outside world.

@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/agent"
-	"github.com/USERNAME/mancar/internal/domain"
-	"github.com/USERNAME/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/agent"
+	"github.com/tinoimammp/mancar/internal/domain"
+	"github.com/tinoimammp/mancar/internal/protocol"
 )
 
 type echo struct {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USERNAME/mancar/internal/config"
+	"github.com/tinoimammp/mancar/internal/config"
 )
 
 const (
