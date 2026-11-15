@@ -9,7 +9,10 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,6 +28,7 @@ import (
 
 	"github.com/tinoimammp/mancar/internal/auth"
 	"github.com/tinoimammp/mancar/internal/config"
+	"github.com/tinoimammp/mancar/internal/dashboard"
 	"github.com/tinoimammp/mancar/internal/domain"
 	"github.com/tinoimammp/mancar/internal/server"
 	"github.com/tinoimammp/mancar/internal/store/postgres"
@@ -35,6 +39,7 @@ import (
 // Env is everything the commands need from the outside world.
 type Env struct {
 	Getenv         func(string) string
+	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 	// Listener is an optional pre-bound listener for "serve" (tests). When
 	// nil the server listens on LISTEN_ADDR.
@@ -52,7 +57,9 @@ func (e Env) dbWait(def time.Duration) time.Duration {
 }
 
 // OSEnv returns an Env backed by the real process environment.
-func OSEnv() Env { return Env{Getenv: os.Getenv, Stdout: os.Stdout, Stderr: os.Stderr} }
+func OSEnv() Env {
+	return Env{Getenv: os.Getenv, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
+}
 
 const usage = `mancard - self-hosted tunnel gateway
 
@@ -64,6 +71,12 @@ Usage:
   mancard token list                      list agent tokens
   mancard token revoke ID                 revoke an agent token
   mancard token generate                  print a random token (for DEV_AGENT_TOKEN)
+  mancard admin set --user NAME [--password-stdin]
+                                            create a dashboard admin or reset its password
+                                            (a strong password is generated unless
+                                            --password-stdin is given)
+  mancard admin list                      list dashboard admins
+  mancard admin delete NAME               delete a dashboard admin
   mancard healthcheck                     exit 0 if the local gateway is healthy
   mancard version
 
@@ -83,6 +96,8 @@ func Main(ctx context.Context, args []string, e Env) int {
 		return withConfig(e, false, func(cfg *config.Config, log *slog.Logger) int { return cmdMigrate(ctx, e, cfg, log) })
 	case "token":
 		return cmdToken(ctx, e, args)
+	case "admin":
+		return cmdAdmin(ctx, e, args)
 	case "healthcheck":
 		return withConfig(e, false, func(cfg *config.Config, _ *slog.Logger) int { return cmdHealthcheck(ctx, e, cfg) })
 	case "version", "--version", "-v":
@@ -147,7 +162,7 @@ func cmdServe(ctx context.Context, e Env, cfg *config.Config, log *slog.Logger) 
 			log.Error("database migration failed", "err", err)
 			return 1
 		}
-		deps.Auth, deps.Registry, deps.HealthCheck = st, st, st.Ping
+		deps.Auth, deps.Registry, deps.HealthCheck, deps.Admin = st, st, st.Ping, st
 	case "memory":
 		mem := auth.NewMemory()
 		token := cfg.DevAgentToken
@@ -333,6 +348,135 @@ func cmdToken(ctx context.Context, e Env, args []string) int {
 				return 1
 			}
 			fmt.Fprintln(e.Stdout, "token revoked; connected agents using it are disconnected on their next reconnect")
+			return 0
+		}
+	})
+}
+
+// ---- dashboard admins -------------------------------------------------------
+
+func cmdAdmin(ctx context.Context, e Env, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprint(e.Stderr, "mancard admin: expected set, list or delete\n\n"+usage)
+		return 2
+	}
+	sub, args := args[0], args[1:]
+	switch sub {
+	case "set", "list", "delete":
+	default:
+		fmt.Fprintf(e.Stderr, "mancard admin: unknown subcommand %q\n\n%s", sub, usage)
+		return 2
+	}
+	fs := flag.NewFlagSet("admin "+sub, flag.ContinueOnError)
+	fs.SetOutput(e.Stderr)
+	user := fs.String("user", "", "admin username")
+	fromStdin := fs.Bool("password-stdin", false, "read the password from the first line of standard input")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	var password string
+	generated := false
+	if sub == "set" {
+		u := strings.ToLower(strings.TrimSpace(*user))
+		if !usernameRE.MatchString(u) {
+			fmt.Fprintln(e.Stderr, "mancard: --user is required: 1-64 characters from a-z, 0-9, '.', '_' and '-'")
+			return 2
+		}
+		*user = u
+		if *fromStdin {
+			if e.Stdin == nil {
+				fmt.Fprintln(e.Stderr, "mancard: no standard input available")
+				return 2
+			}
+			line, err := bufio.NewReader(io.LimitReader(e.Stdin, 4096)).ReadString('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				fmt.Fprintf(e.Stderr, "mancard: reading password: %v\n", err)
+				return 1
+			}
+			password = strings.TrimRight(line, "\r\n")
+		} else {
+			b := make([]byte, 18)
+			if _, err := rand.Read(b); err != nil {
+				fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
+				return 1
+			}
+			password, generated = base64.RawURLEncoding.EncodeToString(b), true
+		}
+		if len([]rune(password)) < dashboard.MinPasswordLength {
+			fmt.Fprintf(e.Stderr, "mancard: %v\n", dashboard.ErrWeakPassword)
+			return 2
+		}
+	}
+
+	return withConfig(e, false, func(cfg *config.Config, _ *slog.Logger) int {
+		st, err := openStore(ctx, e, cfg)
+		if err != nil {
+			fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
+			return 1
+		}
+		defer st.Close()
+		// The dashboard tables may be newer than the running gateway.
+		if err := st.Migrate(ctx, migrations.FS); err != nil {
+			fmt.Fprintf(e.Stderr, "mancard: migration failed: %v\n", err)
+			return 1
+		}
+		switch sub {
+		case "set":
+			hash, err := dashboard.HashPassword(password)
+			if err != nil {
+				fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
+				return 1
+			}
+			created, err := st.SetAdmin(ctx, *user, hash)
+			if err != nil {
+				fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
+				return 1
+			}
+			if generated {
+				fmt.Fprintln(e.Stdout, password)
+			}
+			what := "Password reset for admin %q; their existing sessions are signed out."
+			if created {
+				what = "Created admin %q."
+			}
+			fmt.Fprintf(e.Stderr, what+"\n", *user)
+			if generated {
+				fmt.Fprintln(e.Stderr, "The generated password above is shown only once; store it safely.")
+			}
+			fmt.Fprintf(e.Stderr, "Dashboard: %s/dashboard/\n", cfg.PublicURL(cfg.BaseDomain))
+			return 0
+		case "list":
+			list, err := st.ListAdmins(ctx)
+			if err != nil {
+				fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
+				return 1
+			}
+			tw := tabwriter.NewWriter(e.Stdout, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(tw, "USERNAME\tCREATED\tLAST LOGIN")
+			for _, a := range list {
+				last := "never"
+				if a.LastLoginAt != nil {
+					last = a.LastLoginAt.UTC().Format("2006-01-02 15:04")
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\n", a.Username, a.CreatedAt.UTC().Format("2006-01-02 15:04"), last)
+			}
+			tw.Flush()
+			return 0
+		default: // delete
+			if fs.NArg() != 1 {
+				fmt.Fprintln(e.Stderr, "mancard admin delete: expected exactly one username")
+				return 2
+			}
+			switch err := st.DeleteAdmin(ctx, fs.Arg(0)); {
+			case errors.Is(err, postgres.ErrNotFound):
+				fmt.Fprintln(e.Stderr, "mancard: no admin with that username")
+				return 1
+			case err != nil:
+				fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
+				return 1
+			}
+			fmt.Fprintln(e.Stdout, "admin deleted; their sessions end immediately")
 			return 0
 		}
 	})
