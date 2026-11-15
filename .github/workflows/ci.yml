@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: mancar
           POSTGRES_PASSWORD: testpw
@@ -29,8 +29,8 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://mancar:testpw@127.0.0.1:5432/mancar_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: gofmt
@@ -48,20 +48,20 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: shellcheck -x scripts/*.sh
 
   edge-e2e:
     # Real Caddy in front of the real gateway, with the production Caddyfile.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: install Caddy
         run: |
-          V=2.10.2
+          V=2.11.9
           curl -fsSL -o caddy.tgz "https://github.com/caddyserver/caddy/releases/download/v${V}/caddy_${V}_linux_amd64.tar.gz"
           tar xzf caddy.tgz caddy
           sudo mv caddy /usr/local/bin/caddy
@@ -71,8 +71,8 @@ jobs:
   vulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -82,7 +82,7 @@ jobs:
     # Proves both images build and the compose file is valid.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: build gateway image
         run: docker build --build-arg VERSION=ci -t mancar:ci .
       - name: build edge image (Caddy + Cloudflare DNS plugin)
