@@ -380,6 +380,12 @@ func (a *Agent) handleStream(st net.Conn, tunnels map[string]TunnelSpec) {
 	if err != nil {
 		a.log.Warn("local service unreachable", "addr", spec.LocalAddr, "err", err)
 		if spec.Proto == protocol.ProtoHTTP {
+			// Read the request head first: answering before the gateway has
+			// sent its request makes its HTTP client treat the reply as an
+			// unsolicited response on an idle connection and discard it.
+			_ = st.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_, _ = http.ReadRequest(bufio.NewReader(st))
+			_ = st.SetReadDeadline(time.Time{})
 			body := fmt.Sprintf("mancar: the local service at %s is not reachable.\n", spec.LocalAddr)
 			_ = st.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			fmt.Fprintf(st, localDown, len(body), body)
