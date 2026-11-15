@@ -40,6 +40,10 @@ services:
       args:
         VERSION: "${MANCAR_VERSION:-dev}"
     image: ${MANCAR_IMAGE:-ghcr.io/tinoimammp/mancar}:${MANCAR_VERSION:-latest}
+    # "always": every "docker compose up" checks the registry, so
+    # MANCAR_VERSION=latest picks up new releases. A pinned version that is
+    # already present is not downloaded again.
+    pull_policy: ${MANCAR_PULL_POLICY:-always}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -83,6 +87,7 @@ services:
     build:
       context: ./docker/caddy
     image: ${MANCAR_EDGE_IMAGE:-ghcr.io/tinoimammp/mancar-edge}:${MANCAR_VERSION:-latest}
+    pull_policy: ${MANCAR_PULL_POLICY:-always}
     restart: unless-stopped
     depends_on:
       gateway:
