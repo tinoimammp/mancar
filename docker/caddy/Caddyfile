@@ -1,0 +1,53 @@
+# TLS edge for mancar.
+#
+# Terminates HTTPS for the base domain and for every tunnel subdomain, and
+# forwards everything to the gateway over the private Docker network. Agents
+# connect through here too: the gateway endpoint uses an HTTP/1.1 upgrade
+# ("Upgrade: mancar/1"), which Caddy forwards transparently.
+#
+# Two certificates are obtained, one for *.BASE_DOMAIN (every tunnel) and one
+# for BASE_DOMAIN itself, using the ACME DNS-01 challenge through the Cloudflare
+# API: the only challenge type that can issue wildcard certificates. Renewal is
+# automatic. (Let's Encrypt allows 50 certificates per registered domain per
+# week; a first start uses two, so there is plenty of room.)
+{
+	email {$ACME_EMAIL}
+	acme_ca {$ACME_CA:https://acme-v02.api.letsencrypt.org/directory}
+
+	# Ports are overridable only so the configuration can be tested without
+	# root; production uses the defaults.
+	http_port {$CADDY_HTTP_PORT:80}
+	https_port {$CADDY_HTTPS_PORT:443}
+
+	# The admin endpoint stays inside the container (used by the healthcheck).
+	admin localhost:{$CADDY_ADMIN_PORT:2019}
+
+	servers {
+		timeouts {
+			read_header 10s
+		}
+	}
+}
+
+{$BASE_DOMAIN}, *.{$BASE_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+		# Check DNS propagation against Cloudflare directly instead of the
+		# container's resolver, which may cache negative answers.
+		resolvers 1.1.1.1 1.0.0.1
+	}
+
+	reverse_proxy {$GATEWAY_UPSTREAM:gateway:8080} {
+		# Stream responses as they arrive (server-sent events, long polling).
+		flush_interval -1
+		transport http {
+			versions 1.1
+			dial_timeout 5s
+		}
+		# No response timeouts on purpose: tunnelled applications may stream
+		# for hours. The gateway enforces its own limits.
+	}
+
+	# Access logging is off by default: URLs often carry secrets. The gateway
+	# logs method, host, path and status without the query string.
+}

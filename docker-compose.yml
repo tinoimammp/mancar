@@ -1,0 +1,121 @@
+# mancar: gateway + PostgreSQL + TLS edge.
+#
+#   cp .env.example .env && ./scripts/setup.sh
+#   docker compose up -d
+#
+# Only the edge (80, 443) and the TCP tunnel port range are published.
+# PostgreSQL and the gateway's HTTP port are reachable only on the internal
+# Docker network.
+
+name: mancar
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-mancar}"
+      POSTGRES_DB: "${POSTGRES_DB:-mancar}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required: run scripts/setup.sh or see .env.example}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks: [internal]
+
+  gateway:
+    build:
+      context: .
+      args:
+        VERSION: "${MANCAR_VERSION:-dev}"
+    image: ${MANCAR_IMAGE:-ghcr.io/username/mancar}:${MANCAR_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: "${APP_ENV:-production}"
+      BASE_DOMAIN: "${BASE_DOMAIN:?BASE_DOMAIN is required (see .env.example)}"
+      LISTEN_ADDR: ":8080"
+      PUBLIC_SCHEME: https
+      STORAGE: postgres
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: "${POSTGRES_USER:-mancar}"
+      POSTGRES_DB: "${POSTGRES_DB:-mancar}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required: run scripts/setup.sh}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?ENCRYPTION_KEY is required: run scripts/setup.sh}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      TCP_PORT_RANGE: "${TCP_PORT_MIN:-20000}-${TCP_PORT_MAX:-20099}"
+      MAX_TUNNELS_PER_AGENT: "${MAX_TUNNELS_PER_AGENT:-}"
+      MAX_AGENTS_PER_USER: "${MAX_AGENTS_PER_USER:-}"
+      MAX_CONNECTIONS_PER_TUNNEL: "${MAX_CONNECTIONS_PER_TUNNEL:-}"
+      MAX_REQUEST_BODY_BYTES: "${MAX_REQUEST_BODY_BYTES:-}"
+      RESPONSE_HEADER_TIMEOUT: "${RESPONSE_HEADER_TIMEOUT:-}"
+      HOSTNAME_HOLD_CUSTOM: "${HOSTNAME_HOLD_CUSTOM:-}"
+      HOSTNAME_HOLD_RANDOM: "${HOSTNAME_HOLD_RANDOM:-}"
+      AUTH_FAILURE_LIMIT_PER_MINUTE: "${AUTH_FAILURE_LIMIT_PER_MINUTE:-}"
+    # TCP tunnels listen on this range inside the container; publish the same
+    # range. Narrow TCP_PORT_MIN/TCP_PORT_MAX if you need few tunnels: Docker
+    # starts one proxy per published port.
+    ports:
+      - "${TCP_PORT_MIN:-20000}-${TCP_PORT_MAX:-20099}:${TCP_PORT_MIN:-20000}-${TCP_PORT_MAX:-20099}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging: *logging
+    networks: [internal]
+
+  caddy:
+    build:
+      context: ./docker/caddy
+    image: ${MANCAR_EDGE_IMAGE:-ghcr.io/username/mancar-edge}:${MANCAR_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      BASE_DOMAIN: "${BASE_DOMAIN:?BASE_DOMAIN is required (see .env.example)}"
+      ACME_EMAIL: "${ACME_EMAIL:?ACME_EMAIL is required (see .env.example)}"
+      CLOUDFLARE_API_TOKEN: "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is required (see .env.example)}"
+      ACME_CA: "${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data      # certificates and the ACME account: keep this volume
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+    networks: [internal]
+
+networks:
+  internal:
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

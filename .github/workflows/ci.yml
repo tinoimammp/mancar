@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mancar
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: mancar_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mancar -d mancar_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://mancar:testpw@127.0.0.1:5432/mancar_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        run: go vet ./...
+      - name: tests (race detector, real PostgreSQL)
+        run: go test -race -count=1 -timeout 15m ./...
+      - name: every release target compiles
+        run: |
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/...
+          done
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -x scripts/*.sh
+
+  edge-e2e:
+    # Real Caddy in front of the real gateway, with the production Caddyfile.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: install Caddy
+        run: |
+          V=2.10.2
+          curl -fsSL -o caddy.tgz "https://github.com/caddyserver/caddy/releases/download/v${V}/caddy_${V}_linux_amd64.tar.gz"
+          tar xzf caddy.tgz caddy
+          sudo mv caddy /usr/local/bin/caddy
+          caddy version
+      - run: scripts/e2e-edge.sh
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  docker:
+    # Proves both images build and the compose file is valid.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build gateway image
+        run: docker build --build-arg VERSION=ci -t mancar:ci .
+      - name: build edge image (Caddy + Cloudflare DNS plugin)
+        run: docker build -t mancar-edge:ci docker/caddy
+      - name: gateway image runs as non-root and answers --version
+        run: |
+          docker run --rm mancar:ci version
+          test "$(docker image inspect mancar:ci --format '{{.Config.User}}')" = "nonroot:nonroot"
+      - name: compose file validates
+        run: |
+          cp .env.example .env
+          ./scripts/setup.sh
+          BASE_DOMAIN=tunnel.example.com ACME_EMAIL=ci@example.com CLOUDFLARE_API_TOKEN=x docker compose config --quiet
+      - name: compose refuses to start without the required variables
+        run: |
+          cp .env.example .env
+          if docker compose config --quiet 2>err.txt; then echo "compose accepted an empty .env"; exit 1; fi
+          grep -q "is required" err.txt
