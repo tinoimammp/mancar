@@ -123,7 +123,9 @@ Usage:
   mancar update [--check]           install the latest release (verified with SHA256SUMS)
   mancar version
 
-Tunnels print a request log; add --quiet to hide it.
+Tunnels print a request log. By default successful static files (.js, .css,
+images, fonts) are summarised in one line per burst; --log all shows every
+request, --log errors only 4xx/5xx, --quiet nothing.
 
 Environment:
   MANCAR_SERVER            gateway URL (overrides the config file; --server overrides both)
