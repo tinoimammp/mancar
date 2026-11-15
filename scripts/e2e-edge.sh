@@ -11,7 +11,7 @@
 # exactly what runs in production.
 #
 # Requires: go, caddy >= 2.8, curl, openssl, python3.
-# shellcheck disable=SC2015,SC2317  # "A && ok || fail" is intentional: ok never fails; cleanup runs via trap
+# shellcheck disable=SC2015,SC2317,SC2329  # "A && ok || fail" is intentional: ok never fails; cleanup runs via trap
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
