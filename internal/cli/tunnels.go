@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,7 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 	server := fs.String("server", "", "gateway URL (overrides MANCAR_SERVER and the config file)")
 	subdomain := fs.String("subdomain", "", "request this subdomain (http only)")
 	random := fs.Bool("random", false, "use a random subdomain (http only)")
+	quiet := fs.Bool("quiet", false, "do not print the request log")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return flagExit(err)
@@ -68,13 +71,14 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 	if label != "" {
 		fmt.Fprintln(e.Stdout, "Checking availability...")
 	}
-	return runTunnels(ctx, e, s, []agent.TunnelSpec{spec}, p)
+	return runTunnels(ctx, e, s, []agent.TunnelSpec{spec}, p, *quiet)
 }
 
 // cmdStart implements "mancar start [NAME...]" for saved tunnels.
 func cmdStart(ctx context.Context, e Env, args []string) int {
 	fs := newFlagSet(e, "start")
 	server := fs.String("server", "", "gateway URL (overrides MANCAR_SERVER and the config file)")
+	quiet := fs.Bool("quiet", false, "do not print the request log")
 	names, err := parseFlags(fs, args)
 	if err != nil {
 		return flagExit(err)
@@ -108,7 +112,7 @@ func cmdStart(ctx context.Context, e Env, args []string) int {
 	if err != nil {
 		return fail(e, 2, "%v", err)
 	}
-	return runTunnels(ctx, e, s, specs, nil)
+	return runTunnels(ctx, e, s, specs, nil, *quiet)
 }
 
 func chooseSubdomain(p *prompter) (string, bool) {
@@ -150,22 +154,28 @@ func askSubdomain(p *prompter) (string, bool) {
 
 // runTunnels connects, keeps the tunnels up and returns the exit code. When
 // prompting is possible, a refused custom subdomain is asked for again.
-func runTunnels(ctx context.Context, e Env, s settings, specs []agent.TunnelSpec, p *prompter) int {
+func runTunnels(ctx context.Context, e Env, s settings, specs []agent.TunnelSpec, p *prompter, quiet bool) int {
 	warnUnreachableLocals(e, specs)
+	// Main already showed a cached notice; only announce what is newer.
+	go e.watchUpdates(ctx, e.cachedUpdate().Latest)
 
 	inst := newInstance(e, s.server, specs)
 	defer inst.close()
 	r := &renderer{out: e.Stdout, server: s.server}
 
 	for {
-		a, err := agent.New(agent.Options{
+		opts := agent.Options{
 			ServerURL: s.server, DialAddr: s.dialAddr, Token: s.token, Tunnels: specs,
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 			OnStatus: func(st agent.Status) {
 				inst.update(st)
 				r.onStatus(st)
 			},
-		})
+		}
+		if !quiet {
+			opts.OnEvent = r.onEvent
+		}
+		a, err := agent.New(opts)
 		if err != nil {
 			return fail(e, 2, "%v", strings.TrimPrefix(err.Error(), "agent: "))
 		}
@@ -243,12 +253,65 @@ type renderer struct {
 	connecting    bool
 	announced     []string
 	lastReconnect string
+	// request log
+	labels    map[string]string // tunnel ID -> hostname or :port (several tunnels)
+	logHeader bool
 }
 
 func (r *renderer) reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.connecting, r.announced, r.lastReconnect = false, nil, ""
+}
+
+// onEvent prints one line of the request log.
+func (r *renderer) onEvent(spec agent.TunnelSpec, ev protocol.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.logHeader {
+		r.logHeader = true
+		fmt.Fprint(r.out, "\nRequests\n--------\n")
+	}
+	ts := ev.Time.Local().Format("15:04:05")
+	prefix := ""
+	if l := r.labels[ev.TunnelID]; l != "" && len(r.labels) > 1 {
+		prefix = l + "  "
+	}
+	if spec.Proto == protocol.ProtoTCP {
+		fmt.Fprintf(r.out, "%s  %sTCP   %-21s  %s in / %s out  %s\n", ts, prefix, ev.Remote,
+			humanBytes(ev.BytesIn), humanBytes(ev.BytesOut), humanDuration(ev.DurationMs))
+		return
+	}
+	status := strconv.Itoa(ev.Status)
+	if txt := http.StatusText(ev.Status); txt != "" {
+		status += " " + txt
+	}
+	fmt.Fprintf(r.out, "%s  %s%-6s %-40s %-24s %s\n", ts, prefix, ev.Method, clip(ev.Path, 40), status, humanDuration(ev.DurationMs))
+}
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-3] + "..."
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1<<20:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	}
+}
+
+func humanDuration(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%d ms", ms)
+	}
+	return (time.Duration(ms) * time.Millisecond).Round(100 * time.Millisecond).String()
 }
 
 func (r *renderer) onStatus(s agent.Status) {
@@ -281,6 +344,15 @@ func (r *renderer) onStatus(s agent.Status) {
 			return
 		}
 		r.announced = urls
+		r.labels = map[string]string{}
+		for _, t := range s.Tunnels {
+			l := t.Registered.Hostname
+			if l == "" {
+				l = ":" + strconv.Itoa(t.Registered.Port)
+			}
+			r.labels[t.Registered.TunnelID] = l
+		}
+		r.logHeader = false
 		printOnline(r.out, s.Tunnels, first)
 	}
 }

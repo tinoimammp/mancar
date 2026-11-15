@@ -14,12 +14,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/tinoimammp/mancar/internal/version"
 )
 
 // Env is everything the commands need from the outside world. Tests replace
@@ -42,6 +41,14 @@ type Env struct {
 	Now       func() time.Time
 	// HeartbeatEvery is how often a running agent refreshes its state file.
 	HeartbeatEvery time.Duration
+
+	// Self-update ("mancar update"). An empty ReleasesURL disables update
+	// checks entirely (tests never reach the network).
+	ReleasesURL string
+	HTTPClient  *http.Client
+	Executable  func() (string, error) // path of the running binary
+	GOOS        string                 // default runtime.GOOS
+	GOARCH      string                 // default runtime.GOARCH
 }
 
 // OSEnv returns an Env backed by the real process.
@@ -54,6 +61,10 @@ func OSEnv() Env {
 		e.ConfigDir = d
 	} else if d, err := os.UserConfigDir(); err == nil {
 		e.ConfigDir = filepath.Join(d, "mancar")
+	}
+	e.ReleasesURL = DefaultReleasesURL
+	if u := os.Getenv("MANCAR_RELEASES_URL"); u != "" {
+		e.ReleasesURL = u
 	}
 	if d := os.Getenv("MANCAR_STATE_DIR"); d != "" {
 		e.StateDir = d
@@ -109,11 +120,15 @@ Usage:
   mancar config add-tunnel NAME http|tcp ADDR [--subdomain NAME]
   mancar config rm-tunnel NAME
   mancar config path
+  mancar update [--check]           install the latest release (verified with SHA256SUMS)
   mancar version
 
+Tunnels print a request log; add --quiet to hide it.
+
 Environment:
-  MANCAR_SERVER   gateway URL (overrides the config file; --server overrides both)
-  MANCAR_TOKEN    agent token (overrides the config file)
+  MANCAR_SERVER            gateway URL (overrides the config file; --server overrides both)
+  MANCAR_TOKEN             agent token (overrides the config file)
+  MANCAR_NO_UPDATE_CHECK=1 do not look for or announce new releases
 
 Ask your gateway operator for a token: mancard token create --user NAME
 `
@@ -127,6 +142,11 @@ func Main(ctx context.Context, args []string, e Env) int {
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
+	case "update", "version", "--version", "-v", "help", "--help", "-h":
+	default:
+		e.noticeFromCache() // one line, from the cache: never slows a command down
+	}
+	switch cmd {
 	case "http", "tcp":
 		return cmdTunnel(ctx, e, cmd, rest)
 	case "start":
@@ -137,9 +157,10 @@ func Main(ctx context.Context, args []string, e Env) int {
 		return cmdStop(ctx, e, rest)
 	case "config":
 		return cmdConfig(e, rest)
+	case "update":
+		return cmdUpdate(ctx, e, rest)
 	case "version", "--version", "-v":
-		fmt.Fprintf(e.Stdout, "mancar %s\n", version.Version)
-		return 0
+		return cmdVersion(ctx, e)
 	case "help", "--help", "-h":
 		fmt.Fprint(e.Stdout, usageText)
 		return 0
