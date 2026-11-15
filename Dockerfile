@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -o /out/mancard ./cmd/mancard
 
 # distroless/static: no shell, no package manager, runs as an unprivileged user.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /out/mancard /mancard
 USER nonroot:nonroot
 EXPOSE 8080
