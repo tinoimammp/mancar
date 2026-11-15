@@ -80,6 +80,13 @@ Then create a token for a user and hand it to them:
 docker compose exec gateway /mancard token create --user alice --name laptop
 ```
 
+Or use the web dashboard at `https://mydomain.com/dashboard/`. Create an admin
+account first (a strong password is generated and shown once):
+
+```bash
+docker compose exec gateway /mancard admin set --user admin
+```
+
 Step-by-step with troubleshooting: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Use the client
@@ -115,6 +122,7 @@ reconnect gets the same address.
 * TCP tunnels on a configurable public port range
 * Random (`blue-falcon`) and custom subdomains with atomic reservation
 * Per-user agent tokens (stored only as hashes), revocable instantly
+* Web dashboard: live agents and tunnels, token, user and hostname management
 * Automatic reconnect with backoff; the public address survives reconnects
 * Limits on tunnels, agents, connections and request size; failed-login rate limiting
 * Structured JSON logs, health checks, graceful shutdown

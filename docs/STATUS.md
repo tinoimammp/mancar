@@ -26,7 +26,7 @@ environment (see the note) · ❌ not implemented.
 | Rate limiting | ⚠️ | Only failed agent logins per client address. No per-tunnel or per-IP limit on public traffic |
 | Request size and connection limits | ✅ | |
 | Management REST API (OpenAPI) | ❌ | Only `/healthz` and `/api/v1/system/health`. Tokens are managed with `mancard token ...` |
-| Web dashboard | ❌ | |
+| Web dashboard | ✅ | `/dashboard/`: live agents and tunnels, disconnect, users, tokens (create, revoke with immediate disconnect), hostname reservations. Needs PostgreSQL storage |
 | Access logs | ⚠️ | One structured log line per public request; no stored traffic log |
 | Docker self-hosting | ⚠️ | Compose file validated with the real Compose v2 binary; **images not built in the authoring environment** (no Docker there). CI builds them |
 
@@ -36,7 +36,7 @@ environment (see the note) · ❌ not implemented.
 |---|---|
 | UDP tunnelling, OAuth, traffic policies, endpoint management | ❌ |
 | Observability | ⚠️ health endpoints and structured logs; no metrics |
-| Multi-user management | ⚠️ users and tokens via CLI; no roles, no UI or API |
+| Multi-user management | ⚠️ users and tokens via CLI and dashboard; dashboard admins are all equal (no roles); no public management API |
 | High availability, horizontal scaling | ❌ single gateway node; hostname and port allocation assume one node (the data model is already in PostgreSQL) |
 | Redis | ❌ not needed yet |
 
@@ -45,7 +45,7 @@ environment (see the note) · ❌ not implemented.
 | | |
 |---|---|
 | Agent authentication, token hashing | ✅ |
-| Dashboard authentication, JWT sessions, password hashing, API tokens | ❌ nothing to protect yet; `JWT_SECRET`/`ENCRYPTION_KEY` are validated but unused |
+| Dashboard authentication, signed sessions, password hashing | ✅ PBKDF2-SHA256, HMAC-signed cookie keyed by `JWT_SECRET`, login rate limit, CSRF protection. API tokens for automation: ❌ |
 | Request size / connection limits | ✅ |
 | Cross-user isolation, hostname spoofing, open-proxy prevention | ✅ tested |
 | No plaintext secrets in logs | ✅ tested |
@@ -54,7 +54,7 @@ Details and gaps: [SECURITY.md](SECURITY.md).
 
 ## Database
 
-Implemented: `users`, `agent_tokens`, `domains` (UUID keys, foreign keys with
+Implemented: `users`, `agent_tokens`, `domains`, `admins` (UUID keys, foreign keys with
 cascade, unique constraints, check constraints, indexes, versioned atomic
 migrations, advisory-locked so parallel starts are safe).
 Not yet: `agents`, `tunnels` (history), `certificates`, `api_keys`,

@@ -22,6 +22,24 @@ docker compose exec caddy wget -qO- --header 'Host: tunnel.example.com' \
 
 A database outage turns this into HTTP 503 with `"status":"degraded"`.
 
+## Dashboard
+
+The dashboard is served at `https://BASE_DOMAIN/dashboard/` (PostgreSQL storage
+only). It shows connected agents and their tunnels and manages users, tokens
+and hostname reservations. Admin accounts are managed on the server:
+
+```bash
+docker compose exec gateway /mancard admin set --user admin      # create, or reset the password
+echo 'my long passphrase' | docker compose exec -T gateway /mancard admin set --user admin --password-stdin
+docker compose exec gateway /mancard admin list
+docker compose exec gateway /mancard admin delete admin
+```
+
+Without `--password-stdin` a random password is generated and printed once.
+Resetting a password or deleting an admin signs their sessions out at once.
+Sessions last 12 hours. Every dashboard change is logged as
+`dashboard action` with the admin's name and client address.
+
 ## Users and tokens
 
 Users exist implicitly: creating a token for a name creates the user.
@@ -150,7 +168,8 @@ There is no metrics endpoint yet. Until there is, watch:
 | `CLOUDFLARE_API_TOKEN` | Create a new token, update `.env`, `docker compose up -d caddy`, delete the old token in Cloudflare |
 | `POSTGRES_PASSWORD` | `docker compose exec postgres psql -U mancar -c "ALTER USER mancar PASSWORD '<new>'"`, update `.env`, `docker compose up -d gateway` |
 | Agent tokens | Create new, distribute, revoke old (see above) |
-| `JWT_SECRET`, `ENCRYPTION_KEY` | Validated at start-up but **not used by any feature yet** (they are reserved for the dashboard and API milestones). Nothing is encrypted with them today. Keep them; once a feature uses them, its release notes will describe rotation |
+| `JWT_SECRET` | Signs dashboard sessions. Changing it and restarting the gateway signs every admin out; nothing else is affected |
+| `ENCRYPTION_KEY` | Validated at start-up but **not used by any feature yet**. Nothing is encrypted with it today |
 
 ## Moving to a new server
 

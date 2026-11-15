@@ -33,7 +33,27 @@ internet ──▶ Caddy (TLS) ──▶ gateway ──▶ agent ──▶ local
 * **Failed-login rate limiting:** each client address (the real one behind the edge, not the proxy's) may fail `AUTH_FAILURE_LIMIT_PER_MINUTE` times per minute (default 10). Beyond that the request is answered `429` without a database lookup. One abusive client does not lock out others behind the same proxy.
 * Revocation stops new connections immediately; sessions that are already connected continue until they reconnect (see [OPERATIONS.md](OPERATIONS.md)).
 
-There are no passwords, dashboard logins, sessions or JWTs in this version, because there is no dashboard. `JWT_SECRET` and `ENCRYPTION_KEY` are validated at start-up but not used by any feature yet.
+### Dashboard
+
+* Admin passwords are hashed with PBKDF2-SHA256 (600,000 iterations, random
+  salt) and must be at least 12 characters. Unknown usernames cost the same
+  time as wrong passwords.
+* Failed logins are limited to 10 per 15 minutes per client address and per
+  username.
+* The session is a cookie signed with HMAC-SHA256 under a key derived from
+  `JWT_SECRET`: `HttpOnly`, `SameSite=Strict`, and over HTTPS `Secure` with the
+  `__Host-` prefix, so a tunnel subdomain can neither read nor overwrite it.
+  It is re-checked against the database on every request; resetting the
+  password or deleting the admin ends it immediately.
+* State-changing requests need the `X-Mancar-CSRF` header and a matching
+  `Origin`, which blocks cross-site request forgery (including from a tunnel
+  subdomain, which is a different origin).
+* The page is served with a strict Content-Security-Policy (no inline or
+  third-party scripts, `frame-ancestors 'none'`), and the front end inserts
+  all server data as text, never as HTML.
+* Agent token secrets are shown once at creation and never stored.
+
+`ENCRYPTION_KEY` is validated at start-up but not used by any feature yet.
 
 ## Isolation between users
 
