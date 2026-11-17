@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mancar dashboard preview</title>
+<!--
+  UI preview for tuning the dashboard: the real static/style.css and
+  static/app.js with fake data, no gateway and no login. Never embedded in the
+  binary (only static/ is). Run: make dashboard-preview
+  Theme: ?theme=light | ?theme=dark | (none) follows the system.
+  ?click=N opens the Nth clickable row, e.g. a detail sheet.
+-->
+<script src="mock.js"></script>
+<script>
+  // ?theme=light|dark|system is stored the way the dashboard's own theme
+  // switcher stores it, then theme.js applies it.
+  const theme = new URLSearchParams(location.search).get("theme");
+  if (theme) { try { localStorage.setItem("mancar-theme", theme); } catch {} }
+</script>
+<script src="../static/theme.js"></script>
+<link rel="stylesheet" href="../static/style.css">
+<script src="../static/app.js" defer></script>
+<script>
+  // ?click=N opens the Nth clickable row (detail sheet) once the page renders.
+  const n = Number(new URLSearchParams(location.search).get("click"));
+  if (n) setTimeout(() => { const c = document.querySelectorAll("main .cell.clickable")[n - 1]; if (c) c.click(); }, 900);
+</script>
+</head>
+<body>
+<div id="app"></div>
+<nav class="preview-bar" aria-label="Preview theme">
+  preview:
+  <a href="?theme=light">light</a>
+  <a href="?theme=dark">dark</a>
+  <a href="?theme=system">system</a>
+</nav>
+<style>
+  /* preview chrome only: not part of the design system */
+  .preview-bar { position: fixed; right: 8px; bottom: 8px; z-index: 99; font: 12px system-ui; padding: 4px 8px;
+    border-radius: 6px; background: rgb(0 0 0 / .65); color: #fff; display: flex; gap: 8px; }
+  .preview-bar a { color: #9cc0ff; }
+</style>
+</body>
+</html>

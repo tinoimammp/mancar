@@ -10,7 +10,7 @@ DIST     := dist
 #     -e POSTGRES_DB=mancar_test -p 5432:5432 postgres:18-alpine
 #   export TEST_DATABASE_URL='postgres://mancar:testpw@127.0.0.1:5432/mancar_test?sslmode=disable'
 
-.PHONY: all build test race vet fmt fmt-check check shellcheck e2e-edge dist docker clean
+.PHONY: all build test race vet fmt fmt-check check shellcheck e2e-edge dist docker clean dashboard-preview
 
 all: check build
 
@@ -66,3 +66,10 @@ docker:
 
 clean:
 	rm -rf bin $(DIST)
+
+# UI preview of the web dashboard with fake data: the real static/style.css
+# and static/app.js, no gateway, no login. Edit, then refresh the browser.
+PREVIEW_PORT ?= 8090
+dashboard-preview:
+	@echo "Dashboard preview: http://localhost:$(PREVIEW_PORT)/preview/   (?theme=light | ?theme=dark)"
+	@python3 -m http.server $(PREVIEW_PORT) --bind 127.0.0.1 --directory internal/dashboard
