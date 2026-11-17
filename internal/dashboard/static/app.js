@@ -4,8 +4,20 @@
 
 const API = "/api/v1/admin";
 const REFRESH_MS = 5000;
+const OVERVIEW_TUNNELS = 6; // the overview lists the busiest few; the Agents page has them all
+// Page sizes. Lists come whole from the API and are paged here; requests are
+// the newest REQUESTS_LOADED (the API caps a list at 500).
+const AGENTS_PER_PAGE = 10;
+const REQUESTS_PER_PAGE = 25;
+const REQUESTS_LOADED = 500;
+const ROWS_PER_PAGE = 15; // users, tokens, domains
 
-const state = { user: null, view: "overview", data: {}, timer: null, reqHost: "" };
+const state = {
+  user: null, view: "overview", data: {}, timer: null, reqHost: "",
+  agentQuery: "", agentShow: "all", // agents page: search and filter
+  pages: {}, // current page per paginated list
+  search: {}, // search text per list page (tokens, users, domains)
+};
 
 // ---- DOM helpers -----------------------------------------------------------
 
@@ -32,12 +44,12 @@ const LOGO = () => {
   const p = document.createElementNS(ns, "path");
   p.setAttribute("d", "M5 24V8l11 9 11-9v16");
   p.setAttribute("fill", "none");
-  p.setAttribute("stroke", "white");
+  p.setAttribute("stroke", "currentColor");
   p.setAttribute("stroke-width", "3.5");
   p.setAttribute("stroke-linecap", "round");
   p.setAttribute("stroke-linejoin", "round");
   svg.append(p);
-  return h("span", { class: "logo" }, svg);
+  return h("span", { class: "mark" }, svg);
 };
 
 function toast(msg) {
@@ -66,12 +78,16 @@ function dur(s) {
 
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleString() : "");
 
-async function copy(text) {
+// copy(text, quiet): quiet skips the success toast for callers that show
+// their own confirmation; a failure is always reported.
+async function copy(text, quiet = false) {
   try {
     await navigator.clipboard.writeText(text);
-    toast("Copied to clipboard");
+    if (!quiet) toast("Copied to clipboard");
+    return true;
   } catch {
     toast("Copy failed: select the text and copy it manually");
+    return false;
   }
 }
 
@@ -115,12 +131,12 @@ async function api(method, path, body) {
 // ---- views -----------------------------------------------------------------
 
 const VIEWS = {
-  overview: { title: "Overview", load: loadOverview, render: renderOverview },
-  agents: { title: "Agents & tunnels", load: () => api("GET", "/agents"), render: renderAgents },
-  requests: { title: "Requests", load: loadRequests, render: renderRequests },
-  tokens: { title: "Tokens", load: () => api("GET", "/tokens"), render: renderTokens },
-  users: { title: "Users", load: () => api("GET", "/users"), render: renderUsers },
-  domains: { title: "Domains", load: () => api("GET", "/domains"), render: renderDomains },
+  overview: { title: "Overview", icon: "home", load: loadOverview, render: renderOverview },
+  agents: { title: "Agents & tunnels", icon: "agents", load: () => api("GET", "/agents"), render: renderAgents },
+  requests: { title: "Requests", icon: "activity", load: loadRequests, render: renderRequests },
+  tokens: { title: "Tokens", icon: "tokens", load: () => api("GET", "/tokens"), render: renderTokens },
+  users: { title: "Users", icon: "user", load: () => api("GET", "/users"), render: renderUsers },
+  domains: { title: "Domains", icon: "domains", load: () => api("GET", "/domains"), render: renderDomains },
 };
 
 async function loadOverview() {
@@ -140,6 +156,7 @@ function renderLogin(message) {
       onsubmit: async (ev) => {
         ev.preventDefault();
         btn.disabled = true;
+        btn.setAttribute("aria-busy", "true");
         err.hidden = true;
         try {
           const r = await api("POST", "/login", { username: user.value, password: pass.value });
@@ -152,6 +169,7 @@ function renderLogin(message) {
           pass.focus();
         } finally {
           btn.disabled = false;
+          btn.removeAttribute("aria-busy");
         }
       },
     },
@@ -168,10 +186,10 @@ function renderLogin(message) {
       h(
         "div",
         { class: "login-card" },
-        h("div", { class: "brand" }, LOGO(), "mancar"),
-        h("p", { class: "muted small" }, "Sign in to manage your tunnel gateway."),
+        h("div", { class: "brand" }, LOGO(), h("span", { class: "brand-text" }, h("span", { class: "brand-name" }, "mancar"), h("span", { class: "brand-sub" }, "Sign in to the tunnel dashboard"))),
         form,
-        h("p", { class: "muted small" }, "No account? On the server run ", h("code", {}, "mancard admin set --user NAME"), "."),
+        h("p", { class: "muted small login-hint" }, "No account? On the server run:"),
+        codeBlock("mancard admin set --user NAME"),
       ),
     ),
   );
@@ -186,24 +204,50 @@ function renderShell() {
       h(
         "button",
         { "data-view": key, onclick: () => go(key), "aria-current": state.view === key ? "page" : null },
-        h("span", {}, v.title),
+        icon(v.icon),
+        v.title,
         h("span", { class: "count", "data-count": key, hidden: true }),
       ),
     ),
   );
-  const side = h(
-    "aside",
-    { class: "side" },
-    h("div", { class: "brand" }, LOGO(), "mancar"),
-    nav,
-    h(
-      "div",
-      { class: "side-foot" },
-      h("span", { class: "muted small" }, "Signed in as ", h("strong", {}, state.user)),
-      h("button", { class: "btn sm", onclick: logout }, "Log out"),
+  // light or dark; until one is picked the page follows the system, and the
+  // switch shows whichever of the two is in effect
+  const themes = [["light", "sun", "Light"], ["dark", "moon", "Dark"]];
+  const switcher = h(
+    "div",
+    { class: "segmented", role: "group", "aria-label": "Theme" },
+    themes.map(([value, ic, label]) =>
+      h(
+        "button",
+        {
+          type: "button", title: label, "aria-label": label + " theme", "data-theme-choice": value,
+          "aria-pressed": String(document.documentElement.dataset.theme === value),
+          onclick: () => window.mancarTheme.set(value),
+        },
+        icon(ic),
+      ),
     ),
   );
-  document.getElementById("app").replaceChildren(h("div", { class: "shell" }, side, h("main", { id: "main" })));
+  const topbar = h(
+    "header",
+    { class: "topbar" },
+    h("div", { class: "brand" }, LOGO(), h("span", { class: "brand-text" }, h("span", { class: "brand-name" }, "mancar"), h("span", { class: "brand-sub" }, "Tunnel dashboard"))),
+    h(
+      "div",
+      { class: "bar-actions row" },
+      h("button", { class: "text-link", type: "button", onclick: clientSheet }, icon("book"), h("span", {}, "Connect a client")),
+      switcher,
+      h("button", { class: "text-link", type: "button", onclick: logout, "aria-label": "Sign out " + state.user }, icon("logout"), h("span", {}, "Sign out")),
+    ),
+  );
+  const page = h(
+    "div",
+    { class: "page" },
+    h("div", { class: "eyebrow-row" }, h("span", { class: "eyebrow" }, state.user)),
+    nav,
+    h("main", { id: "main" }),
+  );
+  document.getElementById("app").replaceChildren(h("div", { class: "shell" }, h("div", { class: "frame" }, topbar, page)));
   go(location.hash.slice(1) in VIEWS ? location.hash.slice(1) : state.view);
 }
 
@@ -255,7 +299,20 @@ function draw() {
   const v = VIEWS[state.view];
   const main = document.getElementById("main");
   if (!main) return;
-  main.replaceChildren(...[].concat(v.render(state.data[state.view])));
+  // A field marked data-keep keeps focus and caret through the re-render that
+  // runs every few seconds and on each keystroke of a live filter.
+  const act = document.activeElement;
+  const keep = act && act.dataset && act.dataset.keep;
+  const caret = keep ? [act.selectionStart, act.selectionEnd] : null;
+  // Views may return null/false for optional parts; never render them as text.
+  main.replaceChildren(...[].concat(v.render(state.data[state.view])).filter((n) => n != null && n !== false));
+  if (keep) {
+    const el = main.querySelector(`[data-keep="${keep}"]`);
+    if (el) {
+      el.focus();
+      if (caret[0] != null) el.setSelectionRange(caret[0], caret[1]);
+    }
+  }
   updateCounts();
 }
 
@@ -274,406 +331,917 @@ function updateCounts() {
   if (d.domains) set("domains", d.domains.domains.length);
 }
 
+// ---- building blocks --------------------------------------------------------
+//
+// Layout: a floating header bar, then an eyebrow line, segmented section tabs,
+// a large title, and content in white rounded cards: stat cards for numbers
+// and lists for things. Lists have avatar discs, no separators, a status
+// badge and an arrow when the row opens a detail sheet.
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// One icon set: outline glyphs on a 24px grid, 2px rounded strokes.
+const ICONS = {
+  agents: "M4 5h16v11H4zM2 20h20",
+  tokens: "M15 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zM11 11v10M11 15h4M11 18h3",
+  domains: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3c3.5 4 3.5 14 0 18M12 3c-3.5 4-3.5 14 0 18",
+  link: "M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1",
+  terminal: "M4 6l6 6-6 6M12 18h8",
+  server: "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
+  database: "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+  eye: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+  clock: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2",
+  tag: "M3 12V3h9l9 9-9 9zM7.5 7.5h.01",
+  user: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0",
+  arrow: "M7 17L17 7M8 7h9v9",
+  search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4",
+  sun: "M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4",
+  moon: "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z",
+  monitor: "M3 4h18v12H3zM8 21h8M12 16v5",
+  logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+  book: "M2 4h7a3 3 0 0 1 3 3v14a2 2 0 0 0-2-2H2zM22 4h-7a3 3 0 0 0-3 3v14a2 2 0 0 1 2-2h8z",
+  plus: "M12 5v14M5 12h14",
+  trash: "M3 6h18M8 6V4h8v2M6 6l1 15h10l1-15",
+  ban: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM5.6 5.6l12.8 12.8",
+  copy: "M9 9h11v11H9zM5 15H4V4h11v1",
+  check: "M5 12l5 5 9-10",
+  replay: "M3 12a9 9 0 1 0 2.6-6.4L3 8M3 3v5h5",
+  activity: "M3 12h4l3-8 4 16 3-8h4",
+  alert: "M12 9v4M12 17h.01M10.3 3.9L2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
+  chart: "M3 3v18h18M8 17v-5M13 17V8M18 17v-9",
+  home: "M3 11l9-8 9 8M5 9.5V20h5v-6h4v6h5V9.5",
+  left: "M15 18l-6-6 6-6",
+  right: "M9 18l6-6-6-6",
+};
+
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(SVG_NS, "path");
+  p.setAttribute("d", ICONS[name]);
+  p.setAttribute("fill", "none");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "2");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  svg.append(p);
+  return svg;
+}
+
+const initials = (s) => String(s || "?").replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "?";
+const avatar = (content) => h("span", { class: "avatar", "aria-hidden": "true" }, typeof content === "string" ? content : content);
+const pad2 = (n) => String(n).padStart(2, "0");
+
 function head(title, sub, ...actions) {
-  return h("div", { class: "head" }, h("div", {}, h("h1", {}, title), sub && h("p", { class: "muted" }, sub)), actions.length ? h("div", { class: "row" }, actions) : null);
-}
-
-function table(cols, rows, empty) {
-  if (!rows.length) return h("div", { class: "empty" }, empty);
   return h(
-    "div",
-    { class: "table-wrap" },
-    h("table", {}, h("thead", {}, h("tr", {}, cols.map((c) => h("th", { scope: "col" }, c)))), h("tbody", {}, rows)),
+    "header",
+    { class: "head" },
+    // sub: a sentence, or an array of nodes shown on one line (slug + badge)
+    h("div", {}, h("h1", {}, title), sub ? (Array.isArray(sub) ? h("div", { class: "meta-line" }, sub) : h("p", {}, sub)) : null),
+    actions.length ? h("div", { class: "row" }, actions) : null,
   );
 }
 
-function confirmThen(message, fn) {
-  return async () => {
-    if (!confirm(message)) return;
-    try {
-      await fn();
-      refresh();
-    } catch (e) {
-      toast(e.message);
-    }
+// group(header, content, footer, meta): an uppercase section header with an
+// optional count on the right, then a card (list rows) or stat grid.
+function group(header, rows, footer, meta) {
+  const all = [].concat(rows).filter(Boolean);
+  const is = (el, c) => el.classList && el.classList.contains(c);
+  // a button row or a pager sits below the card, never inside it
+  const below = (el) => is(el, "actions") || is(el, "pager");
+  const content = all.filter((el) => !below(el));
+  const acts = all.filter(below);
+  // stat grids and cards bring their own surface; rows go into a list card
+  const standalone = content.length === 1 && (is(content[0], "stats") || is(content[0], "card"));
+  return h(
+    "section",
+    { class: "group" },
+    header || meta ? h("div", { class: "group-head" }, h("h2", { class: "group-header" }, header || ""), meta ? h("span", { class: "group-meta" }, meta) : null) : null,
+    standalone ? content : content.length ? h("div", { class: "list" }, content) : null,
+    acts,
+    footer ? h("p", { class: "group-footer" }, footer) : null,
+  );
+}
+
+// paginate(key, items, size): the slice for the current page of list `key`
+// plus a pager. The page is kept in state.pages and clamped when the list
+// shrinks (a filter, a disconnect), so it never points past the end.
+function paginate(key, items, size) {
+  const pages = Math.max(1, Math.ceil(items.length / size));
+  const page = Math.min(Math.max(1, state.pages[key] || 1), pages);
+  state.pages[key] = page;
+  const from = (page - 1) * size;
+  const slice = items.slice(from, from + size);
+  if (pages === 1) return { slice, pager: null };
+  // after a page change, bring the list's own section back into view (a page
+  // can hold two paged lists, e.g. Active and Revoked tokens)
+  const to = (p) => (e) => {
+    const sections = () => [...document.querySelectorAll("#main .group")];
+    const i = sections().indexOf(e.currentTarget.closest(".group"));
+    state.pages[key] = p;
+    draw();
+    const g = sections()[i];
+    if (g && g.getBoundingClientRect().top < 80) g.scrollIntoView({ block: "start", behavior: "smooth" });
   };
-}
-
-function tunnelLink(t) {
-  const url = t.public_url;
-  const proto = h("span", { class: "badge" }, t.proto.toUpperCase());
-  const link = t.proto === "http" ? h("a", { href: url, target: "_blank", rel: "noopener noreferrer", class: "mono" }, url) : h("span", { class: "mono" }, url);
-  return h(
-    "div",
-    { class: "tunnel" },
-    proto,
-    link,
-    h("button", { class: "btn sm", title: "Copy URL", onclick: () => copy(url) }, "Copy"),
-    t.active_connections ? h("span", { class: "muted small" }, t.active_connections + " open") : null,
-  );
-}
-
-// overview
-function renderOverview(o) {
-  const tunnels = o.agents.flatMap((a) => a.tunnels.map((t) => ({ ...t, username: a.username })));
-  const db = o.database === "ok" ? h("span", { class: "badge ok" }, h("span", { class: "dot" }), "healthy") : h("span", { class: "badge danger" }, h("span", { class: "dot" }), o.database);
-  return [
-    head("Overview", "Gateway for " + o.base_domain),
+  const num = (p) =>
+    h("button", { class: "page-btn", type: "button", onclick: to(p), "aria-label": "Page " + p, "aria-current": p === page ? "page" : null }, p);
+  const arrow = (p, ic, label, off) =>
+    h("button", { class: "page-btn", type: "button", onclick: to(p), disabled: off, "aria-label": label }, icon(ic));
+  const pager = h(
+    "nav",
+    { class: "pager", "aria-label": "Pages" },
+    h("span", { class: "pager-info" }, `Showing ${from + 1}–${from + slice.length} of ${items.length}`),
     h(
       "div",
-      { class: "grid" },
-      stat("Connected agents", o.gateway.sessions),
-      stat("Live tunnels", o.gateway.tunnels),
-      stat("Users", o.users),
-      stat("Active tokens", o.active_tokens),
-      stat("Reserved domains", o.reserved_domains),
-      stat("Requests (24h)", fmtNum(o.traffic_24h.requests)),
-      stat("Server errors (24h)", fmtNum(o.traffic_24h.errors)),
-      stat("Requests (all time)", fmtNum(o.traffic_total.requests)),
+      { class: "pager-pages" },
+      arrow(page - 1, "left", "Previous page", page === 1),
+      pageList(page, pages).map((p) => (p === "…" ? h("span", { class: "page-gap", "aria-hidden": "true" }, "…") : num(p))),
+      arrow(page + 1, "right", "Next page", page === pages),
     ),
-    h(
-      "section",
-      { class: "panel" },
-      h("div", { class: "panel-head" }, h("h2", {}, "Busiest hostnames"), h("span", { class: "muted small" }, "last 24 hours")),
-      table(
-        ["Hostname", "Requests", "Errors", "In", "Out"],
-        o.top_hosts.map((x) =>
-          h(
-            "tr",
-            {},
-            h("td", { class: "mono" }, x.hostname),
-            h("td", {}, fmtNum(x.usage.day.requests)),
-            h("td", {}, x.usage.day.errors ? h("span", { class: "badge danger" }, fmtNum(x.usage.day.errors)) : "0"),
-            h("td", { class: "muted" }, fmtBytes(x.usage.day.bytes_in)),
-            h("td", { class: "muted" }, fmtBytes(x.usage.day.bytes_out)),
-          ),
-        ),
-        "No HTTP traffic in the last 24 hours.",
-      ),
-    ),
-    h(
-      "section",
-      { class: "panel" },
-      h("div", { class: "panel-head" }, h("h2", {}, "Live tunnels"), h("button", { class: "btn sm", onclick: () => go("agents") }, "Manage agents")),
-      table(
-        ["URL", "User", "Since"],
-        tunnels.map((t) => h("tr", {}, h("td", {}, tunnelLink(t)), h("td", {}, t.username || "?"), h("td", { title: fmtDate(t.created_at) }, ago(t.created_at)))),
-        "No tunnels are online. Start one with: mancar http 3000",
-      ),
-    ),
-    h(
-      "section",
-      { class: "panel" },
-      h("div", { class: "panel-head" }, h("h2", {}, "Server")),
-      h(
-        "div",
-        { class: "panel-body" },
-        h(
-          "dl",
-          { class: "kv" },
-          h("dt", {}, "Version"),
-          h("dd", { class: "mono" }, o.version),
-          h("dt", {}, "Base domain"),
-          h("dd", { class: "mono" }, o.base_domain),
-          h("dt", {}, "Agent server URL"),
-          h("dd", { class: "mono" }, location.origin),
-          h("dt", {}, "TCP port range"),
-          h("dd", { class: "mono" }, o.tcp_ports),
-          h("dt", {}, "Database"),
-          h("dd", {}, db),
-          h("dt", {}, "Request inspector"),
-          h("dd", {}, o.inspector),
-          h("dt", {}, "Uptime"),
-          h("dd", {}, dur(o.uptime_seconds)),
-        ),
-      ),
-    ),
-  ];
+  );
+  return { slice, pager };
 }
 
-const fmtNum = (n) => Number(n || 0).toLocaleString();
-
-// usageCell shows 24-hour requests with the 7-day and lifetime totals underneath.
-const usageCell = (u) =>
-  h(
-    "td",
-    {
-      class: "nowrap",
-      title: `24h: ${fmtNum(u.day.errors)} server errors, ${fmtBytes(u.day.bytes_out)} sent\nAll time: ${fmtNum(u.total.errors)} server errors, ${fmtBytes(u.total.bytes_out)} sent`,
+// searchBox(key, placeholder): a live search field for list `key`. The text
+// is kept in state.search[key]; typing filters at once, resets the list to
+// page 1 and keeps the caret (data-keep) through re-renders.
+function searchBox(key, placeholder) {
+  const input = h("input", {
+    type: "search",
+    placeholder,
+    "aria-label": placeholder,
+    value: state.search[key] || "",
+    "data-keep": "search-" + key,
+    oninput: (e) => {
+      state.search[key] = e.target.value.trim().toLowerCase();
+      for (const k of Object.keys(state.pages)) if (k === key || k.startsWith(key + "-")) state.pages[k] = 1;
+      draw();
     },
-    fmtNum(u.day.requests),
-    h("div", { class: "muted small" }, `${fmtNum(u.week.requests)} / 7d · ${fmtNum(u.total.requests)} total`),
-  );
-
-const stat = (label, value) => h("div", { class: "stat" }, h("div", { class: "label" }, label), h("div", { class: "value" }, value));
-
-// agents
-function renderAgents(d) {
-  const rows = d.agents.map((a) =>
-    h(
-      "tr",
-      {},
-      h("td", {}, h("strong", {}, a.username || "?"), h("div", { class: "muted small" }, "token: " + (a.token_name || a.token_id.slice(0, 8)))),
-      h("td", {}, a.tunnels.length ? h("div", { class: "tunnels" }, a.tunnels.map(tunnelLink)) : h("span", { class: "muted" }, "no tunnels")),
-      h("td", { class: "mono" }, a.client || ""),
-      h("td", { class: "mono small" }, a.agent_version || "?"),
-      h("td", { title: fmtDate(a.connected_at) }, ago(a.connected_at)),
-      h(
-        "td",
-        { class: "actions" },
-        h(
-          "button",
-          {
-            class: "btn sm danger",
-            onclick: confirmThen(`Disconnect ${a.username}'s agent? Its tunnels go offline; the agent reconnects unless its token is revoked.`, () =>
-              api("POST", `/agents/${encodeURIComponent(a.id)}/disconnect`),
-            ),
-          },
-          "Disconnect",
-        ),
-      ),
-    ),
-  );
-  return [
-    head("Agents & tunnels", "Every connected mancar client and the tunnels it serves."),
-    h("section", { class: "panel" }, table(["User", "Tunnels", "Client address", "Agent", "Connected", ""], rows, "No agents are connected.")),
-  ];
-}
-
-// tokens
-function renderTokens(d) {
-  const rows = d.tokens.map((t) => {
-    const status = t.revoked_at
-      ? h("span", { class: "badge danger" }, "revoked")
-      : t.connected_agents
-        ? h("span", { class: "badge ok" }, h("span", { class: "dot" }), "online")
-        : h("span", { class: "badge" }, "active");
-    return h(
-      "tr",
-      {},
-      h("td", {}, h("strong", {}, t.name), h("div", { class: "muted small mono" }, t.id)),
-      h("td", {}, t.username),
-      h("td", {}, status),
-      h("td", { title: fmtDate(t.created_at) }, ago(t.created_at)),
-      h("td", { title: fmtDate(t.last_used_at) }, ago(t.last_used_at)),
-      h(
-        "td",
-        { class: "actions" },
-        t.revoked_at
-          ? null
-          : h(
-              "button",
-              {
-                class: "btn sm danger",
-                onclick: confirmThen(`Revoke token "${t.name}" of ${t.username}? Agents using it are disconnected now and cannot reconnect.`, async () => {
-                  const r = await api("POST", `/tokens/${encodeURIComponent(t.id)}/revoke`);
-                  toast(`Token revoked${r.disconnected_agents ? `, ${r.disconnected_agents} agent(s) disconnected` : ""}`);
-                }),
-              },
-              "Revoke",
-            ),
-      ),
-    );
   });
-  return [
-    head("Tokens", "Agent tokens let a mancar client connect. A secret is shown only once.", h("button", { class: "btn primary", onclick: () => newTokenDialog() }, "New token")),
-    h("section", { class: "panel" }, table(["Name", "User", "Status", "Created", "Last used", ""], rows, "No tokens yet. Create one to connect your first client.")),
-  ];
+  return h("label", { class: "pill-input" }, icon("search"), input);
 }
 
-function newTokenDialog(presetUser) {
-  const err = h("div", { class: "error", role: "alert", hidden: true });
-  const user = h("input", { name: "user", required: true, autocomplete: "off", spellcheck: "false", value: presetUser || "", pattern: "[a-z0-9][a-z0-9._\\-]{0,63}" });
-  const name = h("input", { name: "name", autocomplete: "off", placeholder: "laptop" });
-  const btn = h("button", { class: "btn primary", type: "submit" }, "Create token");
-  const dlg = h("dialog", { "aria-label": "New token" });
+// matches(key, ...fields): whether a row passes the search of list `key`.
+const matches = (key, ...fields) => {
+  const q = state.search[key];
+  return !q || fields.filter(Boolean).join(" ").toLowerCase().includes(q);
+};
+
+// paged(key, items, row, emptyText): group content for a paged list: the
+// rows of the current page plus its pager, or the empty line.
+function paged(key, items, row, emptyText, size = ROWS_PER_PAGE) {
+  if (!items.length) return empty(emptyText);
+  const { slice, pager } = paginate(key, items, size);
+  return [...slice.map(row), pager];
+}
+
+// pageList(5, 12) → [1, "…", 4, 5, 6, "…", 12]: the first, the last and the
+// neighbours of the current page; a gap that would hide one page shows it.
+function pageList(page, pages) {
+  const want = new Set([1, pages, page - 1, page, page + 1].filter((p) => p >= 1 && p <= pages));
+  const sorted = [...want].sort((a, b) => a - b);
+  const out = [];
+  sorted.forEach((p, i) => {
+    const prev = sorted[i - 1];
+    if (prev != null && p - prev === 2) out.push(prev + 1);
+    else if (prev != null && p - prev > 2) out.push("…");
+    out.push(p);
+  });
+  return out;
+}
+
+// actions(...buttons): a row of real buttons that share the width.
+// button(label, onclick, {kind, icon, disabled, hint}): kind is "primary",
+// "danger" or "" (gray).
+const actions = (...btns) => h("div", { class: "actions" }, btns);
+const button = (label, onclick, o = {}) =>
+  h(
+    "button",
+    { class: "btn" + (o.kind ? " " + o.kind : ""), type: "button", onclick, disabled: !!o.disabled, title: o.hint },
+    o.icon ? icon(o.icon) : null,
+    label,
+  );
+
+// the card count picks the columns (.n3: three across), see style.css
+const stats = (...cards) => h("div", { class: "stats n" + cards.length }, cards);
+// stat(label, value, {onclick, tone, icon}): icon is an ICONS name shown in a
+// neutral gray disc on the right of the label.
+const stat = (label, value, opts = {}) =>
+  h(
+    opts.onclick ? "button" : "div",
+    { class: "stat" + (opts.onclick ? " clickable" : ""), type: opts.onclick ? "button" : null, onclick: opts.onclick },
+    h(
+      "div",
+      { class: "stat-top" },
+      h("div", { class: "stat-label" }, label),
+      opts.icon ? h("span", { class: "stat-icon", "aria-hidden": "true" }, icon(opts.icon)) : null,
+    ),
+    h("div", { class: "stat-value" + (opts.tone ? " " + opts.tone : "") }, value),
+  );
+
+// cell(opts): one list row.
+//   avatar: "AB" | icon name   title, subtitle (monoSub)   value   trailing
+//   onclick → arrow            tone: "action" | "destructive" | "disabled"
+function cell(o) {
+  const clickable = typeof o.onclick === "function";
+  let lead = null;
+  if (o.avatar) lead = avatar(ICONS[o.avatar] ? icon(o.avatar) : o.avatar);
+  return h(
+    clickable ? "button" : "div",
+    { class: ["cell", o.tone, clickable && "clickable"].filter(Boolean).join(" "), type: clickable ? "button" : null, onclick: o.onclick, title: o.hint },
+    lead,
+    h(
+      "span",
+      { class: "cell-text" },
+      h("span", { class: "cell-title" + (o.mono ? " mono" : "") }, o.title),
+      o.subtitle ? h("span", { class: "cell-subtitle" + (o.monoSub ? " mono" : "") }, o.subtitle) : null,
+    ),
+    o.value != null ? h("span", { class: "cell-value" + (o.monoValue ? " mono" : "") }, o.value) : null,
+    o.trailing || null,
+    clickable && !o.tone ? h("span", { class: "go" }, icon("arrow")) : null,
+  );
+}
+
+const empty = (text) => h("div", { class: "cell empty" }, h("span", { class: "cell-text" }, h("span", { class: "cell-subtitle" }, text)));
+
+// sheet(title, build): a detail sheet with a Done button; a centered card on
+// wide screens and a bottom sheet on phones (CSS).
+function sheet(title, build, opts = {}) {
+  // tabindex -1: initial focus goes to the sheet itself, not to its first
+  // button, so no focus ring shows until the keyboard is used.
+  const dlg = h("dialog", { class: "sheet" + (opts.wide ? " wide" : ""), "aria-label": title, tabindex: "-1" });
   const close = () => {
     dlg.close();
     dlg.remove();
-    refresh();
+    if (opts.onClose) opts.onClose();
   };
-  const form = h(
-    "form",
-    {
-      class: "dialog-body",
-      onsubmit: async (ev) => {
-        ev.preventDefault();
-        btn.disabled = true;
-        try {
-          const r = await api("POST", "/tokens", { user: user.value.trim().toLowerCase(), name: name.value.trim() });
-          dlg.replaceChildren(tokenCreated(r, close));
-        } catch (e) {
-          err.textContent = e.message;
-          err.hidden = false;
-          btn.disabled = false;
-        }
-      },
-    },
-    h("h2", {}, "New agent token"),
-    err,
-    h("label", {}, "User", user, h("span", { class: "hint" }, "Lower-case letters, digits, '.', '_' or '-'. A new user is created if needed.")),
-    h("label", {}, "Label", name, h("span", { class: "hint" }, "Where the token is used, for example the machine name.")),
-    h("div", { class: "row" }, h("button", { class: "btn", type: "button", onclick: close }, "Cancel"), btn),
+  dlg.append(
+    h(
+      "div",
+      { class: "sheet-bar" },
+      h("span", {}),
+      h("h2", { class: "sheet-title" }, title),
+      h("button", { class: "link-btn strong", type: "button", onclick: close }, "Done"),
+    ),
+    h("div", { class: "sheet-body" }, build(close)),
   );
-  dlg.append(form);
   dlg.addEventListener("cancel", (e) => {
     e.preventDefault();
     close();
   });
   document.body.append(dlg);
   dlg.showModal();
-  (presetUser ? name : user).focus();
+  dlg.focus();
+  return { dlg, close };
 }
 
-function tokenCreated(r, close) {
-  const cmds = `mancar config set server ${location.origin}\nmancar config set token -   # paste the token, then Ctrl+D\nmancar http 3000`;
+// confirmDialog({title, message, action, danger}, run): a small centered
+// alert with Cancel and an action button, used instead of the browser's
+// confirm(). The action runs inside the dialog: the button shows a spinner,
+// the dialog closes on success, and an error stays visible in the dialog.
+function confirmDialog(o, run) {
+  const dlg = h("dialog", { class: "alert", role: "alertdialog", "aria-label": o.title, tabindex: "-1" });
+  const err = h("div", { class: "error", role: "alert", hidden: true });
+  const cancel = h("button", { class: "btn", type: "button" }, "Cancel");
+  const ok = h("button", { class: "btn " + (o.danger === false ? "primary" : "danger"), type: "button" }, o.action || "OK");
+  const busy = (on) => {
+    ok.disabled = cancel.disabled = on;
+    if (on) ok.setAttribute("aria-busy", "true");
+    else ok.removeAttribute("aria-busy");
+  };
+  const done = () => {
+    dlg.close();
+    dlg.remove();
+  };
+  cancel.addEventListener("click", done);
+  dlg.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    if (!ok.disabled) done();
+  });
+  ok.addEventListener("click", async () => {
+    busy(true);
+    err.hidden = true;
+    try {
+      await run();
+      done();
+    } catch (e) {
+      err.textContent = e.message;
+      err.hidden = false;
+      busy(false);
+    }
+  });
+  dlg.append(
+    h("div", { class: "alert-body" }, h("h2", { class: "alert-title" }, o.title), o.message ? h("p", { class: "alert-message" }, o.message) : null, err),
+    h("div", { class: "alert-actions" }, cancel, ok),
+  );
+  document.body.append(dlg);
+  dlg.showModal();
+  dlg.focus();
+}
+
+// confirmThen(opts, fn): a click handler that asks first, runs fn, then
+// reloads the current view.
+const confirmThen = (o, fn) => () =>
+  confirmDialog(o, async () => {
+    await fn();
+    refresh();
+  });
+
+const copyButton = (text, label = "Copy") =>
+  h(
+    "button",
+    {
+      class: "btn sm",
+      type: "button",
+      onclick: (e) => {
+        e.stopPropagation();
+        copy(text);
+      },
+    },
+    label,
+  );
+
+// codeBlock(text, {label, copy, body}): monospace text in a filled box with
+// its own Copy button. label is a line above it; copy is what the button
+// copies (text by default, false hides the button); body caps the height for
+// long payloads.
+function codeBlock(text, o = {}) {
+  const value = o.copy === undefined ? text : o.copy;
+  const btn = value === false ? null : codeBlockCopy(value, o.label);
   return h(
     "div",
-    { class: "dialog-body" },
-    h("h2", {}, "Token created"),
-    h("div", { class: "notice" }, "Copy it now. It is not stored and will never be shown again."),
-    h("div", { class: "secret" }, h("code", {}, r.token), h("button", { class: "btn", onclick: () => copy(r.token) }, "Copy")),
-    h("p", { class: "muted small" }, `For user ${r.user} (${r.name}). Set up the client with:`),
-    h("pre", {}, cmds),
-    h("div", { class: "row" }, h("button", { class: "btn", onclick: () => copy(cmds) }, "Copy commands"), h("button", { class: "btn primary", onclick: close }, "Done")),
+    { class: "snippet" },
+    o.label ? h("div", { class: "snippet-label" }, o.label) : null,
+    h("div", { class: "codeblock" + (btn ? " has-copy" : "") }, h("pre", { class: o.body ? "body" : null }, text), btn),
   );
 }
 
-// users
-function renderUsers(d) {
-  const rows = d.users.map((u) =>
-    h(
-      "tr",
-      {},
-      h("td", {}, h("strong", {}, u.username)),
-      h("td", {}, u.connected_agents ? h("span", { class: "badge ok" }, h("span", { class: "dot" }), u.connected_agents + " online") : h("span", { class: "muted" }, "offline")),
-      h("td", {}, u.active_tokens),
-      h("td", {}, u.domains),
-      usageCell(u.usage),
-      h("td", { title: fmtDate(u.created_at) }, ago(u.created_at)),
-      h(
-        "td",
-        { class: "actions" },
-        h("button", { class: "btn sm", onclick: () => newTokenDialog(u.username) }, "New token"),
-        " ",
-        h(
-          "button",
-          {
-            class: "btn sm danger",
-            onclick: confirmThen(`Delete user ${u.username}? All their tokens and reserved names are deleted and their agents disconnected. This cannot be undone.`, () =>
-              api("DELETE", `/users/${encodeURIComponent(u.id)}`),
-            ),
-          },
-          "Delete",
-        ),
-      ),
-    ),
-  );
-  return [
-    head("Users", "People or services that own agent tokens and hostnames.", h("button", { class: "btn primary", onclick: () => newTokenDialog() }, "New user")),
-    h("section", { class: "panel" }, table(["User", "Agents", "Active tokens", "Domains", "Requests (24h)", "Created", ""], rows, "No users yet. Creating a token creates its user.")),
-  ];
+// The small Copy chip used by code blocks; flips to "Copied" for a moment.
+function codeBlockCopy(value, label) {
+  const btn = h("button", {
+    class: "code-copy",
+    type: "button",
+    "aria-label": label ? "Copy: " + label : "Copy",
+    onclick: async (e) => {
+      e.stopPropagation();
+      if (!(await copy(value, true))) return;
+      show("check", "Copied");
+      clearTimeout(btn._h);
+      btn._h = setTimeout(() => show("copy", "Copy"), 1600);
+    },
+  });
+  const show = (name, text) => btn.replaceChildren(icon(name), h("span", {}, text));
+  show("copy", "Copy");
+  return btn;
 }
 
-// domains
-function renderDomains(d) {
-  const rows = d.domains.map((x) =>
-    h(
-      "tr",
-      {},
-      h("td", { class: "mono" }, x.hostname),
-      h("td", {}, x.username),
-      h("td", {}, h("span", { class: "badge" }, x.kind)),
-      usageCell(x.usage),
-      h("td", {}, x.online ? h("span", { class: "badge ok" }, h("span", { class: "dot" }), "online") : h("span", { class: "badge warn", title: fmtDate(x.hold_until) }, "held, frees " + ago(x.hold_until))),
-      h(
-        "td",
-        { class: "actions" },
-        x.online
-          ? null
-          : h(
-              "button",
-              {
-                class: "btn sm danger",
-                onclick: confirmThen(`Release ${x.hostname}? Anyone can claim it afterwards.`, () => api("DELETE", `/domains/${encodeURIComponent(x.hostname)}`)),
-              },
-              "Release",
-            ),
-      ),
-    ),
-  );
-  return [
-    head("Domains", "Hostnames in use or held for their owner after a disconnect."),
-    h("section", { class: "panel" }, table(["Hostname", "User", "Kind", "Requests (24h)", "Status", ""], rows, "No hostnames are reserved.")),
-  ];
-}
+// The three client commands, one block each: pasting them together would feed
+// the third line into the token prompt of the second.
+const clientSetup = () => [
+  codeBlock(`mancar config set server ${location.origin}`, { label: "Point the client at this gateway" }),
+  codeBlock("mancar config set token -", { label: "Save the token: paste it, press Enter, then Ctrl+D" }),
+  codeBlock("mancar http 3000", { label: "Open a tunnel to localhost:3000" }),
+];
 
-// requests (inspector)
-async function loadRequests() {
-  try {
-    return await api("GET", "/requests" + (state.reqHost ? "?host=" + encodeURIComponent(state.reqHost) : ""));
-  } catch (e) {
-    if (e.code === "inspector_disabled") return { disabled: e.message };
-    throw e;
-  }
-}
-
+const fmtNum = (n) => Number(n || 0).toLocaleString();
 const fmtBytes = (n) => (n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB");
+const plural = (n, one, many = one + "s") => `${fmtNum(n)} ${n === 1 ? one : many}`;
+const total = (n) => `${pad2(n)} total`;
 
 function statusBadge(code) {
   const cls = code >= 500 ? "danger" : code >= 400 ? "warn" : code >= 200 && code < 400 ? "ok" : "";
   return h("span", { class: "badge " + cls }, code || "—");
 }
 
+const onlineBadge = (label = "online") => h("span", { class: "badge ok" }, h("span", { class: "dot" }), label);
+
+// client setup, opened from the header bar
+function clientSheet() {
+  sheet("Connect a client", (close) => [
+    group("1 · Install", codeBlock("https://github.com/tinoimammp/mancar/releases/latest", { label: "Download mancar from the latest release" })),
+    group("2 · Get a token", actions(button("Create a token", () => (close(), newTokenDialog()), { icon: "tokens" })), "The token is shown once, right after it is created."),
+    group("3 · Connect and open a tunnel", clientSetup(), "Run them one at a time, in this order."),
+  ]);
+}
+
+// ---- overview ------------------------------------------------------------------
+
+function renderOverview(o) {
+  const tunnels = o.agents.flatMap((a) => a.tunnels.map((t) => ({ ...t, username: a.username })));
+  return [
+    head("Overview", [
+      h("span", { class: "mono muted" }, o.base_domain),
+      o.database === "ok" ? onlineBadge("healthy") : h("span", { class: "badge danger" }, "database " + o.database),
+    ]),
+    group("Live", stats(
+      stat("Agents", fmtNum(o.gateway.sessions), { onclick: () => go("agents"), icon: "agents" }),
+      stat("Tunnels", fmtNum(o.gateway.tunnels), { onclick: () => go("agents"), icon: "link" }),
+      stat("Users", fmtNum(o.users), { onclick: () => go("users"), icon: "user" }),
+      stat("Active tokens", fmtNum(o.active_tokens), { onclick: () => go("tokens"), icon: "tokens" }),
+    )),
+    group(
+      "Traffic",
+      stats(
+        stat("Requests", fmtNum(o.traffic_24h.requests), { onclick: () => go("requests"), icon: "activity" }),
+        stat("Server errors", fmtNum(o.traffic_24h.errors), { tone: o.traffic_24h.errors ? "danger" : null, icon: "alert" }),
+        stat("All time", fmtNum(o.traffic_total.requests), { icon: "chart" }),
+        stat("Domains", fmtNum(o.reserved_domains), { onclick: () => go("domains"), icon: "domains" }),
+      ),
+      "Server errors are 5xx responses and requests the local app never answered.",
+      "last 24 hours",
+    ),
+    group(
+      "Busiest tunnels",
+      tunnels.length
+        ? [
+            ...tunnels
+              .sort((x, y) => (y.active_connections || 0) - (x.active_connections || 0))
+              .slice(0, OVERVIEW_TUNNELS)
+              .map((t) => tunnelCell(t, `${t.username} · since ${ago(t.created_at).replace(" ago", "")}`)),
+            tunnels.length > OVERVIEW_TUNNELS ? actions(button(`See all ${tunnels.length} tunnels`, () => go("agents"), { icon: "arrow" })) : null,
+          ]
+        : empty("No tunnels are online. Start one with: mancar http 3000"),
+      null,
+      total(tunnels.length),
+    ),
+    o.top_hosts.length
+      ? group(
+          "Busiest hostnames",
+          o.top_hosts.map((x) =>
+            cell({
+              avatar: initials(x.hostname),
+              title: x.hostname.split(".")[0],
+              subtitle: x.hostname,
+              monoSub: true,
+              value: plural(x.usage.day.requests, "request"),
+            }),
+          ),
+          null,
+          "last 24 hours",
+        )
+      : null,
+    group("Server", [
+      cell({ avatar: "tag", title: "Version", value: o.version, monoValue: true }),
+      cell({ avatar: "server", title: "Agent server URL", value: location.origin, monoValue: true, trailing: copyButton(location.origin) }),
+      cell({ avatar: "terminal", title: "TCP ports", value: o.tcp_ports, monoValue: true }),
+      cell({ avatar: "eye", title: "Request inspector", value: o.inspector }),
+      cell({ avatar: "clock", title: "Uptime", value: dur(o.uptime_seconds) }),
+    ]),
+  ];
+}
+
+function tunnelCell(t, subtitle) {
+  const isHTTP = t.proto === "http";
+  return cell({
+    avatar: isHTTP ? "link" : "terminal",
+    title: t.public_url.replace(/^https?:\/\//, ""),
+    mono: true,
+    subtitle: [t.proto.toUpperCase(), subtitle, t.active_connections ? `${t.active_connections} open` : null].filter(Boolean).join(" · "),
+    trailing: h(
+      "span",
+      { class: "row" },
+      isHTTP ? h("a", { class: "btn sm", href: t.public_url, target: "_blank", rel: "noopener noreferrer", onclick: (e) => e.stopPropagation() }, "Open") : null,
+      copyButton(t.public_url),
+    ),
+  });
+}
+
+// ---- agents --------------------------------------------------------------------
+
+// Agents scale to many: a search box and an All / Active / Idle filter on
+// top, then one row per agent, busiest first, a page at a time. A row opens
+// the agent's sheet with its tunnels and the Disconnect button.
+const openConns = (a) => a.tunnels.reduce((n, t) => n + (t.active_connections || 0), 0);
+
+function renderAgents(d) {
+  const all = d.agents;
+  const tunnelCount = all.reduce((n, a) => n + a.tunnels.length, 0);
+  const connCount = all.reduce((n, a) => n + openConns(a), 0);
+  const title = head("Agents & tunnels", `${plural(all.length, "agent")} · ${plural(tunnelCount, "tunnel")} · ${plural(connCount, "open connection")}`);
+  if (!all.length) return [title, group(null, empty("No agents are connected. Start one with: mancar http 3000"))];
+
+  const q = state.agentQuery;
+  const haystack = (a) => [a.username, a.token_name, a.client, a.agent_version, ...a.tunnels.map((t) => t.public_url)].join(" ").toLowerCase();
+  const byShow = { all: () => true, active: (a) => openConns(a) > 0, idle: (a) => openConns(a) === 0 };
+  const inScope = all.filter((a) => !q || haystack(a).includes(q));
+  const shown = inScope
+    .filter(byShow[state.agentShow])
+    .sort((x, y) => openConns(y) - openConns(x) || String(x.username).localeCompare(String(y.username)));
+
+  const search = h("input", {
+    type: "search",
+    placeholder: "Search user, token, hostname or IP",
+    "aria-label": "Search agents",
+    value: q,
+    "data-keep": "agent-search", // draw() keeps focus here across refreshes
+    oninput: (e) => {
+      state.agentQuery = e.target.value.trim().toLowerCase();
+      state.pages.agents = 1;
+      draw();
+    },
+  });
+  const chip = (key, label) =>
+    h(
+      "button",
+      {
+        type: "button",
+        class: "chip",
+        "aria-pressed": String(state.agentShow === key),
+        onclick: () => {
+          state.agentShow = key;
+          state.pages.agents = 1;
+          draw();
+        },
+      },
+      label,
+      h("span", { class: "chip-count" }, inScope.filter(byShow[key]).length),
+    );
+
+  const { slice, pager } = paginate("agents", shown, AGENTS_PER_PAGE);
+
+  return [
+    title,
+    group(
+      null,
+      h(
+        "div",
+        { class: "card toolbar" },
+        h("label", { class: "pill-input" }, icon("search"), search),
+        h("div", { class: "chips", role: "group", "aria-label": "Show" }, chip("all", "All"), chip("active", "Active"), chip("idle", "Idle")),
+      ),
+    ),
+    group(
+      state.agentShow === "active" ? "Active agents" : state.agentShow === "idle" ? "Idle agents" : "Agents",
+      shown.length ? [...slice.map(agentRow), pager] : empty(q ? `No agent matches “${q}”.` : "No agent in this filter."),
+      "Active means at least one open connection through its tunnels right now.",
+      shown.length === all.length ? total(all.length) : `${shown.length} of ${all.length}`,
+    ),
+  ];
+}
+
+// tunnelNames: the public names of an agent's tunnels, short ("shop-api",
+// ":20042"), the first two and then "+3 more".
+function tunnelNames(a) {
+  const names = a.tunnels.map((t) => (t.proto === "http" ? t.hostname.split(".")[0] : ":" + t.port));
+  if (!names.length) return "no tunnels";
+  return names.length > 2 ? `${names.slice(0, 2).join(", ")} +${names.length - 2} more` : names.join(", ");
+}
+
+// agentRow: one line per agent, like Users and Tokens; details open in a sheet.
+function agentRow(a) {
+  const n = openConns(a);
+  return cell({
+    avatar: initials(a.username),
+    title: `${a.username || "?"} · ${a.token_name || a.token_id.slice(0, 8)}`,
+    subtitle: `${tunnelNames(a)} · since ${ago(a.connected_at).replace(" ago", "")}`,
+    trailing: n ? h("span", { class: "badge ok" }, h("span", { class: "dot" }), `${n} open`) : h("span", { class: "badge" }, "idle"),
+    onclick: () => agentSheet(a),
+  });
+}
+
+function agentSheet(a) {
+  const n = openConns(a);
+  sheet(`${a.username} · ${a.token_name || a.token_id.slice(0, 8)}`, (close) => [
+    group(null, stats(
+      stat("Tunnels", fmtNum(a.tunnels.length)),
+      stat("Open now", fmtNum(n)),
+      stat("Connected", ago(a.connected_at).replace(" ago", "")),
+    )),
+    group(
+      "Tunnels",
+      a.tunnels.length ? a.tunnels.map((t) => tunnelCell(t, "since " + ago(t.created_at).replace(" ago", ""))) : empty("No tunnels open on this agent."),
+      null,
+      total(a.tunnels.length),
+    ),
+    group("Agent", [
+      cell({ title: "User", value: a.username }),
+      cell({ title: "Token", value: a.token_name || a.token_id }),
+      cell({ title: "Client IP", value: a.client || "unknown", monoValue: true }),
+      cell({ title: "mancar version", value: a.agent_version || "?", monoValue: true }),
+      cell({ title: "Connected", value: ago(a.connected_at), hint: fmtDate(a.connected_at) }),
+    ]),
+    group(null, actions(
+      button("Disconnect agent", confirmThen({
+        title: `Disconnect ${a.username}'s agent?`,
+        message: "Its tunnels go offline. The agent reconnects on its own unless its token is revoked.",
+        action: "Disconnect",
+      }, async () => {
+        await api("POST", `/agents/${encodeURIComponent(a.id)}/disconnect`);
+        close();
+      }), { kind: "danger", icon: "ban" }),
+    ), "The agent reconnects on its own unless its token is revoked."),
+  ]);
+}
+
+// ---- tokens --------------------------------------------------------------------
+
+function tokenStatus(t) {
+  if (t.revoked_at) return h("span", { class: "badge danger" }, "revoked");
+  if (t.connected_agents) return onlineBadge();
+  return h("span", { class: "badge" }, "active");
+}
+
+function renderTokens(d) {
+  const hit = (t) => matches("tokens", t.name, t.username, t.id);
+  const active = d.tokens.filter((t) => !t.revoked_at && hit(t));
+  const revoked = d.tokens.filter((t) => t.revoked_at && hit(t));
+  const q = state.search.tokens;
+  const row = (t) =>
+    cell({
+      avatar: initials(t.username),
+      title: t.name,
+      subtitle: `${t.username} · last used ${ago(t.last_used_at)}`,
+      trailing: tokenStatus(t),
+      onclick: () => tokenSheet(t),
+    });
+  return [
+    head(
+      "Tokens",
+      `${d.tokens.filter((t) => !t.revoked_at).length} active of ${d.tokens.length} tokens`,
+      button("Create token", () => newTokenDialog(), { kind: "primary", icon: "plus" }),
+    ),
+    group(null, h("div", { class: "card toolbar" }, searchBox("tokens", "Search token, user or ID"))),
+    group("Active", paged("tokens-active", active, row, q ? `No active token matches “${q}”.` : "No active tokens yet."), null, total(active.length)),
+    revoked.length ? group("Revoked", paged("tokens-revoked", revoked, row, ""), null, total(revoked.length)) : null,
+  ];
+}
+
+// tokenForm(presetUser, onCreated): the new-token form (user, label, create),
+// shown in the New token sheet; onCreated gets the API reply with the secret.
+function tokenForm(presetUser, onCreated) {
+  const err = h("div", { class: "error", role: "alert", hidden: true });
+  const user = h("input", {
+    name: "user", required: true, autocomplete: "off", spellcheck: "false", value: presetUser || "",
+    placeholder: "alice", pattern: "[a-z0-9][a-z0-9._\\-]{0,63}",
+  });
+  const name = h("input", { name: "name", autocomplete: "off", placeholder: "macbook" });
+  const btn = h("button", { class: "btn primary", type: "submit" }, icon("plus"), "Create token");
+  const form = h(
+    "form",
+    {
+      class: "card form stacked",
+      onsubmit: async (ev) => {
+        ev.preventDefault();
+        btn.disabled = true;
+        btn.setAttribute("aria-busy", "true");
+        err.hidden = true;
+        try {
+          const r = await api("POST", "/tokens", { user: user.value.trim().toLowerCase(), name: name.value.trim() });
+          onCreated(r);
+        } catch (e) {
+          err.textContent = e.message;
+          err.hidden = false;
+        } finally {
+          btn.disabled = false;
+          btn.removeAttribute("aria-busy");
+        }
+      },
+    },
+    err,
+    h(
+      "div",
+      { class: "field-row" },
+      h("label", { class: "field" }, "User", h("span", { class: "pill-input" }, icon("user"), user)),
+      h("label", { class: "field" }, "Label", h("span", { class: "pill-input" }, icon("agents"), name)),
+      btn,
+    ),
+  );
+  return form;
+}
+
+// newTokenDialog(presetUser): the "New token" sheet. On success it is
+// replaced by the "Token created" sheet that shows the secret once.
+function newTokenDialog(presetUser) {
+  const { dlg, close } = sheet(presetUser ? "New token for " + presetUser : "New token", () => [
+    group(null, tokenForm(presetUser, (r) => {
+      close();
+      sheet("Token created", () => tokenCreated(r), { onClose: () => refresh() });
+    }), "The secret is shown once, right after it is created."),
+  ]);
+  // start typing at once: the user field, or the label when the user is set
+  dlg.querySelector(presetUser ? 'input[name="name"]' : 'input[name="user"]').focus();
+}
+
+function tokenSheet(t) {
+  sheet(t.name, (close) => [
+    // who and what at a glance: owner, label, status
+    group(null, h(
+      "div",
+      { class: "card profile" },
+      avatar(icon("tokens")),
+      h("div", { class: "cell-text" }, h("span", { class: "profile-title" }, t.name), h("span", { class: "cell-subtitle" }, `Token of ${t.username}`)),
+      tokenStatus(t),
+    )),
+    group(null, stats(
+      stat("Agents now", fmtNum(t.connected_agents)),
+      stat("Last used", t.last_used_at ? ago(t.last_used_at).replace(" ago", "") : "never"),
+      stat("Age", ago(t.created_at).replace(" ago", "")),
+    )),
+    group("Details", [
+      cell({ avatar: "user", title: "User", value: t.username }),
+      cell({ avatar: "clock", title: "Created", value: fmtDate(t.created_at) }),
+      cell({ avatar: "activity", title: "Last used", value: t.last_used_at ? fmtDate(t.last_used_at) : "never" }),
+      t.revoked_at ? cell({ avatar: "ban", title: "Revoked", value: fmtDate(t.revoked_at), tone: "destructive" }) : null,
+    ]),
+    group("Token ID", codeBlock(t.id), "The ID identifies the token in logs. It is not the secret, which is never stored."),
+    t.revoked_at
+      ? null
+      : group(
+          null,
+          actions(button("Revoke token", confirmThen({
+              title: `Revoke token “${t.name}”?`,
+              message: `Agents of ${t.username} using it are disconnected now and cannot reconnect.`,
+              action: "Revoke",
+            }, async () => {
+              const r = await api("POST", `/tokens/${encodeURIComponent(t.id)}/revoke`);
+              close();
+              toast(`Token revoked${r.disconnected_agents ? `, ${r.disconnected_agents} agent(s) disconnected` : ""}`);
+            }), { kind: "danger", icon: "ban" })),
+          "Agents using it are disconnected at once and cannot reconnect.",
+        ),
+  ]);
+}
+
+function tokenCreated(r) {
+  return [
+    h("div", { class: "notice" }, "Copy it now. It is not stored and will never be shown again."),
+    group(`Token for ${r.user} · ${r.name}`, codeBlock(r.token)),
+    group("Set up the client", clientSetup(), "Run them one at a time, in this order."),
+  ];
+}
+
+// ---- users ---------------------------------------------------------------------
+
+function renderUsers(d) {
+  const online = d.users.filter((u) => u.connected_agents).length;
+  const users = d.users.filter((u) => matches("users", u.username));
+  return [
+    head("Users", `${online} online of ${plural(d.users.length, "user")}`),
+    group(null, h("div", { class: "card toolbar" }, searchBox("users", "Search user"))),
+    group(
+      "Users",
+      paged(
+        "users",
+        users,
+        (u) =>
+          cell({
+            avatar: initials(u.username),
+            title: u.username,
+            subtitle: `${plural(u.active_tokens, "token")} · ${plural(u.domains, "domain")} · ${fmtNum(u.usage.day.requests)} requests today`,
+            trailing: u.connected_agents ? onlineBadge(`${u.connected_agents} online`) : h("span", { class: "badge" }, "offline"),
+            onclick: () => userSheet(u),
+          }),
+        state.search.users ? `No user matches “${state.search.users}”.` : "No users yet. Creating a token creates its user.",
+      ),
+      "Creating a token for a new name creates that user.",
+      users.length === d.users.length ? total(d.users.length) : `${users.length} of ${d.users.length}`,
+    ),
+  ];
+}
+
+function userSheet(u) {
+  sheet(u.username, (close) => [
+    group("Traffic", stats(stat("24 hours", fmtNum(u.usage.day.requests)), stat("7 days", fmtNum(u.usage.week.requests)), stat("All time", fmtNum(u.usage.total.requests)))),
+    group(null, [
+      cell({ title: "Connected agents", value: fmtNum(u.connected_agents) }),
+      cell({ title: "Active tokens", value: fmtNum(u.active_tokens) }),
+      cell({ title: "Reserved domains", value: fmtNum(u.domains) }),
+      cell({ title: "Created", value: ago(u.created_at), hint: fmtDate(u.created_at) }),
+    ]),
+    group(null, actions(
+      button("New token", () => (close(), newTokenDialog(u.username)), { kind: "primary", icon: "plus" }),
+      button("Delete user", confirmThen({
+        title: `Delete user ${u.username}?`,
+        message: "Their tokens, reserved names, captured requests and statistics are deleted and their agents disconnected. This cannot be undone.",
+        action: "Delete user",
+      }, async () => {
+        await api("DELETE", `/users/${encodeURIComponent(u.id)}`);
+        close();
+      }), { kind: "danger", icon: "trash" }),
+    ), "Deleting removes their tokens, reserved hostnames, captured requests and statistics, and disconnects their agents."),
+  ]);
+}
+
+// ---- domains -------------------------------------------------------------------
+
+function renderDomains(d) {
+  const hit = (x) => matches("domains", x.hostname, x.username, x.kind);
+  const online = d.domains.filter((x) => x.online && hit(x));
+  const held = d.domains.filter((x) => !x.online && hit(x));
+  const q = state.search.domains;
+  const row = (x) =>
+    cell({
+      avatar: initials(x.hostname),
+      title: x.hostname.split(".")[0],
+      subtitle: `${x.hostname} · ${x.username} · ${x.kind}`,
+      trailing: x.online ? onlineBadge() : h("span", { class: "badge warn", title: fmtDate(x.hold_until) }, "frees " + ago(x.hold_until)),
+      onclick: x.online ? undefined : () => domainSheet(x),
+    });
+  return [
+    head("Domains", `${d.domains.filter((x) => x.online).length} in use of ${plural(d.domains.length, "reserved name")}`),
+    group(null, h("div", { class: "card toolbar" }, searchBox("domains", "Search hostname or owner"))),
+    group("In use", paged("domains-online", online, row, q ? `No hostname in use matches “${q}”.` : "No hostname is in use."), null, total(online.length)),
+    group("Held", paged("domains-held", held, row, q ? `No held hostname matches “${q}”.` : "No hostname is held."), "A disconnected name stays reserved for its owner: 24 hours for custom names, 5 minutes for random ones.", total(held.length)),
+  ];
+}
+
+function domainSheet(x) {
+  sheet(x.hostname, (close) => [
+    group(null, [
+      cell({ title: "Owner", value: x.username }),
+      cell({ title: "Kind", value: x.kind }),
+      cell({ title: "Held until", value: fmtDate(x.hold_until) }),
+      cell({ title: "Requests, all time", value: fmtNum(x.usage.total.requests) }),
+    ]),
+    group(
+      null,
+      actions(button("Release hostname", confirmThen({
+        title: `Release ${x.hostname.split(".")[0]}?`,
+        message: `${x.hostname} is no longer held for ${x.username}. Anyone can claim it afterwards.`,
+        action: "Release",
+      }, async () => {
+        await api("DELETE", `/domains/${encodeURIComponent(x.hostname)}`);
+        close();
+      }), { kind: "danger", icon: "trash" })),
+      "Anyone can claim the name afterwards.",
+    ),
+  ]);
+}
+
+// ---- requests (inspector) ----------------------------------------------------
+
+async function loadRequests() {
+  try {
+    const q = new URLSearchParams({ limit: String(REQUESTS_LOADED) });
+    if (state.reqHost) q.set("host", state.reqHost);
+    return await api("GET", "/requests?" + q);
+  } catch (e) {
+    if (e.code === "inspector_disabled") return { disabled: e.message };
+    throw e;
+  }
+}
+
 function renderRequests(d) {
   if (d.disabled) {
-    return [
-      head("Requests"),
-      h("div", { class: "panel" }, h("div", { class: "empty" }, d.disabled, h("br"), "Set INSPECT=on and ENCRYPTION_KEY in .env, then restart the gateway.")),
-    ];
+    return [head("Requests"), group(null, empty(d.disabled), "Set INSPECT=on and ENCRYPTION_KEY in .env, then restart the gateway.")];
   }
   const filter = h("input", {
     type: "search",
-    placeholder: "Filter by hostname, e.g. my-api." + location.hostname,
+    placeholder: "Filter by hostname",
     value: state.reqHost,
-    class: "filter",
     "aria-label": "Filter by hostname",
     onchange: (e) => {
       state.reqHost = e.target.value.trim().toLowerCase();
+      state.pages.requests = 1;
       refresh(true);
     },
   });
-  const rows = d.requests.map((r) =>
-    h(
-      "tr",
-      { class: "clickable", tabindex: "0", onclick: () => requestDialog(r.id), onkeydown: (e) => e.key === "Enter" && requestDialog(r.id) },
-      h("td", { class: "nowrap", title: fmtDate(r.time) }, new Date(r.time).toLocaleTimeString()),
-      h("td", {}, h("span", { class: "badge" }, r.method), r.replay ? h("span", { class: "badge", title: "Replayed from the dashboard" }, "replay") : null),
-      h("td", { class: "mono uri" }, h("span", { class: "muted" }, r.hostname), r.uri),
-      h("td", {}, statusBadge(r.status)),
-      h("td", { class: "nowrap" }, r.duration_ms + " ms"),
-      h("td", { class: "nowrap muted" }, fmtBytes(r.response_size)),
-    ),
-  );
-  const sub = `Last ${d.requests.length} HTTP requests through your tunnels. Stored encrypted, deleted after ${dur(d.retention_seconds)}.`;
+  const { slice, pager } = paginate("requests", d.requests, REQUESTS_PER_PAGE);
   return [
     head(
       "Requests",
-      sub,
-      filter,
+      `Stored encrypted, deleted after ${dur(d.retention_seconds)}.`,
       h(
         "button",
         {
-          class: "btn danger",
-          onclick: confirmThen(state.reqHost ? `Delete every captured request for ${state.reqHost}?` : "Delete every captured request?", () =>
+          class: "btn outline",
+          onclick: confirmThen({
+            title: state.reqHost ? "Clear requests for this host?" : "Clear all captured requests?",
+            message: state.reqHost
+              ? `Every captured request for ${state.reqHost} is deleted. Usage statistics are kept.`
+              : "Every captured request is deleted. Usage statistics are kept.",
+            action: "Clear",
+          }, () =>
             api("DELETE", "/requests" + (state.reqHost ? "?host=" + encodeURIComponent(state.reqHost) : "")),
           ),
         },
+        icon("trash"),
         "Clear",
       ),
     ),
+    group(null, h("label", { class: "card form" }, h("span", { class: "pill-input" }, icon("search"), filter))),
     d.undecryptable ? h("div", { class: "notice" }, `${d.undecryptable} request(s) cannot be decrypted (ENCRYPTION_KEY changed?) and are hidden.`) : null,
-    h("section", { class: "panel" }, table(["Time", "Method", "URL", "Status", "Duration", "Size"], rows, "No requests captured yet. Open one of your tunnel URLs.")),
+    group(
+      "Latest",
+      d.requests.length
+        ? [
+            ...slice.map((r) =>
+              cell({
+                avatar: r.method.slice(0, 4),
+                title: r.uri,
+                mono: true,
+                subtitle: `${r.hostname} · ${new Date(r.time).toLocaleTimeString()} · ${r.duration_ms} ms · ${fmtBytes(r.response_size)}${r.replay ? " · replay" : ""}`,
+                trailing: statusBadge(r.status),
+                onclick: () => requestDialog(r.id),
+              }),
+            ),
+            pager,
+          ]
+        : empty("No requests captured yet. Open one of your tunnel URLs."),
+      d.requests.length >= REQUESTS_LOADED ? `Showing the latest ${REQUESTS_LOADED}. Filter by hostname to look further back.` : null,
+      total(d.requests.length),
+    ),
   ];
 }
 
@@ -694,22 +1262,22 @@ function toCurl(r) {
   return parts.join(" ");
 }
 
-function headersTable(hdrs) {
+// Headers as a compact two-column table (name, value), like browser dev
+// tools: one short line per header instead of a tall list row each.
+function headerTable(hdrs) {
   const entries = Object.entries(hdrs || {}).sort(([a], [b]) => a.localeCompare(b));
-  if (!entries.length) return h("p", { class: "muted small" }, "No headers.");
+  if (!entries.length) return empty("No headers.");
+  const pairs = entries.flatMap(([k, vs]) => vs.map((v) => [k, v]));
   return h(
-    "table",
-    { class: "kvtable" },
-    h(
-      "tbody",
-      {},
-      entries.flatMap(([k, vs]) => vs.map((v) => h("tr", {}, h("th", { scope: "row" }, k), h("td", { class: "mono" }, v)))),
-    ),
+    "div",
+    { class: "card headers" },
+    h("div", { class: "headers-bar" }, h("span", { class: "group-meta" }, plural(pairs.length, "header")), codeBlockCopy(pairs.map(([k, v]) => `${k}: ${v}`).join("\n"))),
+    h("dl", { class: "kv" }, pairs.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
   );
 }
 
-function bodyView(b) {
-  if (!b || b.size === 0) return h("p", { class: "muted small" }, "Empty body.");
+function bodyGroup(title, b) {
+  if (!b || b.size === 0) return group(title, empty("Empty body."));
   let text = b.text;
   if (text != null) {
     try {
@@ -721,12 +1289,7 @@ function bodyView(b) {
   const notes = [fmtBytes(b.size)];
   if (b.decoded) notes.push("decoded from " + b.decoded);
   if (b.truncated) notes.push(`only the first ${fmtBytes(b.kept)} were kept`);
-  return h(
-    "div",
-    {},
-    h("p", { class: "muted small" }, notes.join(" · ")),
-    text != null ? h("pre", { class: "body" }, text) : h("p", { class: "muted small" }, "Binary content, not shown."),
-  );
+  return group(title, text != null ? codeBlock(text, { body: true }) : h("div", { class: "cell" }, h("span", { class: "cell-subtitle" }, "Binary content, not shown.")), notes.join(" · "));
 }
 
 async function requestDialog(id) {
@@ -737,57 +1300,43 @@ async function requestDialog(id) {
     toast(e.message);
     return;
   }
-  const dlg = h("dialog", { class: "wide", "aria-label": "Request details" });
-  const close = () => {
-    dlg.close();
-    dlg.remove();
-  };
-  const replayBtn = h(
-    "button",
-    {
-      class: "btn primary",
-      disabled: !r.replayable,
-      title: r.replay_blocker || "Send this request to the tunnel again",
-      onclick: async () => {
-        if (!confirm(`Send ${r.method} ${r.uri} to ${r.hostname} again? The application will process it a second time.`)) return;
-        replayBtn.disabled = true;
-        try {
-          const res = await api("POST", `/requests/${encodeURIComponent(r.id)}/replay`);
-          toast(`Replayed: ${res.status} in ${res.duration_ms} ms`);
-          close();
-          refresh();
-        } catch (e) {
-          toast(e.message);
-          replayBtn.disabled = false;
-        }
-      },
-    },
-    "Replay",
+  sheet(
+    `${r.method} ${r.uri}`,
+    (close) => [
+      group(null, [
+        cell({ title: "Status", trailing: statusBadge(r.status) }),
+        cell({ title: "Host", value: r.hostname, monoValue: true }),
+        cell({ title: "Time", value: fmtDate(r.time) }),
+        cell({ title: "Duration", value: r.duration_ms + " ms" }),
+        cell({ title: "Client", value: r.client, monoValue: true }),
+        r.replay ? cell({ title: "Replayed from the dashboard", value: "yes" }) : null,
+      ]),
+      group(
+        null,
+        actions(
+          button("Replay request", r.replayable
+            ? confirmThen({
+                title: `Replay ${r.method} ${r.uri}?`,
+                message: `The request is sent to ${r.hostname} again and the application processes it a second time.`,
+                action: "Replay",
+                danger: false,
+              }, async () => {
+                const res = await api("POST", `/requests/${encodeURIComponent(r.id)}/replay`);
+                toast(`Replayed: ${res.status} in ${res.duration_ms} ms`);
+                close();
+              })
+            : undefined, { kind: "primary", icon: "replay", disabled: !r.replayable, hint: r.replay_blocker || "Send this request to the tunnel again" }),
+        ),
+        r.replay_blocker ? "Cannot replay: " + r.replay_blocker : "Replay sends the request again: the application processes it a second time.",
+      ),
+      group("As curl", codeBlock(toCurl(r), { body: true })),
+      group("Request headers", headerTable(r.request_headers)),
+      bodyGroup("Request body", r.request_body),
+      group("Response headers", headerTable(r.response_headers)),
+      bodyGroup("Response body", r.response_body),
+    ],
+    { wide: true },
   );
-  dlg.append(
-    h(
-      "div",
-      { class: "dialog-body" },
-      h("div", { class: "req-title" }, h("span", { class: "badge" }, r.method), statusBadge(r.status), h("span", { class: "mono uri" }, r.hostname + r.uri)),
-      h("p", { class: "muted small" }, `${fmtDate(r.time)} · ${r.duration_ms} ms · from ${r.client}${r.replay ? " · replayed from the dashboard" : ""}`),
-      r.replay_blocker ? h("div", { class: "notice" }, "Cannot replay: " + r.replay_blocker) : null,
-      h("h3", {}, "Request headers"),
-      headersTable(r.request_headers),
-      h("h3", {}, "Request body"),
-      bodyView(r.request_body),
-      h("h3", {}, "Response headers"),
-      headersTable(r.response_headers),
-      h("h3", {}, "Response body"),
-      bodyView(r.response_body),
-      h("div", { class: "row" }, h("button", { class: "btn", onclick: () => copy(toCurl(r)) }, "Copy as curl"), h("button", { class: "btn", onclick: close }, "Close"), replayBtn),
-    ),
-  );
-  dlg.addEventListener("cancel", (e) => {
-    e.preventDefault();
-    close();
-  });
-  document.body.append(dlg);
-  dlg.showModal();
 }
 
 // ---- start -----------------------------------------------------------------
