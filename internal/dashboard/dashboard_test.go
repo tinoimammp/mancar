@@ -303,10 +303,15 @@ func TestStaticPageAndHeaders(t *testing.T) {
 	if rec.Header().Get("X-Frame-Options") != "DENY" {
 		t.Error("missing X-Frame-Options")
 	}
-	for _, f := range []string{"app.js", "style.css"} {
+	for _, f := range []string{"app.js", "style.css", "theme.js"} {
 		if rec := do(d, req{method: "GET", path: "/dashboard/" + f}); rec.Code != http.StatusOK {
 			t.Errorf("%s: %d", f, rec.Code)
 		}
+	}
+	// the logo must be served as an image: nosniff makes the browser trust the type
+	rec = do(d, req{method: "GET", path: "/dashboard/logo.webp"})
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/webp" {
+		t.Errorf("logo.webp: %d %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
 }
 
