@@ -2,7 +2,12 @@
 // server is inserted as text (never as HTML), so data cannot inject markup.
 "use strict";
 
+// Two roles share this app. An admin manages the whole gateway through
+// /api/v1/admin; a user (self-registered) sees only their own tunnels,
+// tokens and requests through /api/v1/me. Sign-in paths are shared.
 const API = "/api/v1/admin";
+const ME_API = "/api/v1/me";
+const AUTH_PATHS = new Set(["/login", "/logout", "/session", "/signup", "/signup/options"]);
 const REFRESH_MS = 5000;
 const OVERVIEW_TUNNELS = 6; // the overview lists the busiest few; the Agents page has them all
 // Page sizes. Lists come whole from the API and are paged here; requests are
@@ -13,7 +18,7 @@ const REQUESTS_LOADED = 500;
 const ROWS_PER_PAGE = 15; // users, tokens, domains
 
 const state = {
-  user: null, view: "overview", data: {}, timer: null, reqHost: "",
+  user: null, role: "admin", view: "overview", data: {}, timer: null, reqHost: "",
   agentQuery: "", agentShow: "all", // agents page: search and filter
   pages: {}, // current page per paginated list
   search: {}, // search text per list page (tokens, users, domains)
@@ -36,21 +41,9 @@ function h(tag, attrs, ...children) {
   return el;
 }
 
-const LOGO = () => {
-  const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("viewBox", "0 0 32 32");
-  svg.setAttribute("aria-hidden", "true");
-  const p = document.createElementNS(ns, "path");
-  p.setAttribute("d", "M5 24V8l11 9 11-9v16");
-  p.setAttribute("fill", "none");
-  p.setAttribute("stroke", "currentColor");
-  p.setAttribute("stroke-width", "3.5");
-  p.setAttribute("stroke-linecap", "round");
-  p.setAttribute("stroke-linejoin", "round");
-  svg.append(p);
-  return h("span", { class: "mark" }, svg);
-};
+// the mancar mark: logo.webp in a circle next to the name. The image is set in
+// style.css so its path resolves next to the stylesheet (also in the preview).
+const LOGO = () => h("span", { class: "mark", "aria-hidden": "true" });
 
 function toast(msg) {
   let t = document.querySelector(".toast");
@@ -108,7 +101,8 @@ async function api(method, path, body) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(API + path, opts);
+  const base = AUTH_PATHS.has(path) || state.role !== "user" ? API : ME_API;
+  const res = await fetch(base + path, opts);
   if (res.status === 204) return null;
   let json = null;
   try {
@@ -118,7 +112,7 @@ async function api(method, path, body) {
   }
   if (!res.ok) {
     const e = (json && json.error) || {};
-    if (res.status === 401 && path !== "/login" && path !== "/session") {
+    if (res.status === 401 && !AUTH_PATHS.has(path)) {
       state.user = null;
       stopRefresh();
       renderLogin(e.message);
@@ -139,9 +133,59 @@ const VIEWS = {
   domains: { title: "Domains", icon: "domains", load: () => api("GET", "/domains"), render: renderDomains },
 };
 
+// What a signed-in user (not an admin) sees: only their own things. The
+// paths resolve under /api/v1/me (see api()).
+const USER_VIEWS = {
+  overview: { title: "Overview", icon: "home", load: () => api("GET", "/overview"), render: renderMyOverview },
+  tunnels: { title: "Tunnels", icon: "link", load: () => api("GET", "/overview"), render: renderMyTunnels },
+  requests: { title: "Requests", icon: "activity", load: loadRequests, render: renderRequests },
+  tokens: { title: "Tokens", icon: "tokens", load: () => api("GET", "/tokens"), render: renderTokens },
+  // static: no auto-refresh, so a half-typed password is never wiped
+  account: { title: "Account", icon: "user", load: () => api("GET", "/account"), render: renderAccount, static: true },
+};
+
+const views = () => (state.role === "user" ? USER_VIEWS : VIEWS);
+
+// signIn(session): store who is signed in and open the app on a view that
+// exists for their role.
+function signIn(s) {
+  state.user = s.username;
+  state.role = s.role === "user" ? "user" : "admin";
+  state.data = {};
+  if (!(state.view in views())) state.view = "overview";
+  renderShell();
+}
+
 async function loadOverview() {
   const [o, a] = await Promise.all([api("GET", "/overview"), api("GET", "/agents")]);
   return { ...o, agents: a.agents };
+}
+
+// authPage(sub, ...content): the centered card used by sign in, sign up and
+// "check your email".
+function authPage(sub, ...content) {
+  document.getElementById("app").replaceChildren(
+    h(
+      "div",
+      { class: "login" },
+      h(
+        "div",
+        { class: "login-card" },
+        h("div", { class: "brand" }, LOGO(), h("span", { class: "brand-text" }, h("span", { class: "brand-name" }, "mancar"), h("span", { class: "brand-sub" }, sub))),
+        content,
+      ),
+    ),
+  );
+}
+
+// signupOptions: what the gateway allows (REGISTER_ENABLED,
+// REGISTER_VERIFY_EMAIL). Older gateways have no such endpoint: no sign up.
+async function signupOptions() {
+  try {
+    return await api("GET", "/signup/options");
+  } catch {
+    return { enabled: false, verify_email: false };
+  }
 }
 
 function renderLogin(message) {
@@ -159,9 +203,7 @@ function renderLogin(message) {
         btn.setAttribute("aria-busy", "true");
         err.hidden = true;
         try {
-          const r = await api("POST", "/login", { username: user.value, password: pass.value });
-          state.user = r.username;
-          renderShell();
+          signIn(await api("POST", "/login", { username: user.value, password: pass.value }));
         } catch (e) {
           err.textContent = e.message;
           err.hidden = false;
@@ -174,33 +216,100 @@ function renderLogin(message) {
       },
     },
     err,
-    h("label", {}, "Username", user),
+    h("label", {}, "Email or username", user),
     h("label", {}, "Password", pass),
     btn,
   );
-  const app = document.getElementById("app");
-  app.replaceChildren(
-    h(
-      "div",
-      { class: "login" },
-      h(
-        "div",
-        { class: "login-card" },
-        h("div", { class: "brand" }, LOGO(), h("span", { class: "brand-text" }, h("span", { class: "brand-name" }, "mancar"), h("span", { class: "brand-sub" }, "Sign in to the tunnel dashboard"))),
-        form,
-        h("p", { class: "muted small login-hint" }, "No account? On the server run:"),
-        codeBlock("mancard admin set --user NAME"),
-      ),
+  // filled once the gateway says whether sign up is open
+  const footer = h("div", { class: "auth-footer" });
+  authPage("Sign in to the tunnel dashboard", form, footer);
+  user.focus();
+  signupOptions().then((o) =>
+    footer.replaceChildren(
+      ...(o.enabled
+        ? [h("p", { class: "auth-switch" }, "No account yet? ", h("button", { class: "link-btn strong", type: "button", onclick: () => renderSignup(o) }, "Create one"))]
+        : [h("p", { class: "muted small login-hint" }, "No account? Ask the admin, or on the server run:"), codeBlock("mancard admin set --user NAME")]),
     ),
   );
-  user.focus();
+}
+
+// renderSignup(options): email, username and password. With email
+// verification on, the next screen asks to confirm the address.
+function renderSignup(o) {
+  const err = h("div", { class: "error", role: "alert", hidden: true });
+  const email = h("input", { name: "email", type: "email", autocomplete: "email", required: true, placeholder: "you@example.com" });
+  const user = h("input", {
+    name: "username", autocomplete: "username", required: true, spellcheck: "false", placeholder: "tino",
+    pattern: "[a-z0-9][a-z0-9._\\-]{0,63}", title: "Lowercase letters, digits, dot, dash or underscore",
+  });
+  const pass = h("input", { name: "password", type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+  const btn = h("button", { class: "btn primary", type: "submit" }, "Create account");
+  const form = h(
+    "form",
+    {
+      class: "form",
+      onsubmit: async (ev) => {
+        ev.preventDefault();
+        btn.disabled = true;
+        btn.setAttribute("aria-busy", "true");
+        err.hidden = true;
+        try {
+          const r = await api("POST", "/signup", { email: email.value.trim(), username: user.value.trim().toLowerCase(), password: pass.value });
+          if (r.verify_email) renderCheckEmail(email.value.trim());
+          else signIn(r);
+        } catch (e) {
+          err.textContent = e.message;
+          err.hidden = false;
+        } finally {
+          btn.disabled = false;
+          btn.removeAttribute("aria-busy");
+        }
+      },
+    },
+    err,
+    h("label", {}, "Email", email),
+    h("label", {}, "Username", user),
+    h("label", {}, h("span", {}, "Password ", h("span", { class: "label-hint" }, "· at least 10 characters")), pass),
+    btn,
+  );
+  authPage(
+    "Create your account",
+    o.verify_email ? h("p", { class: "auth-note" }, "We'll send a link to confirm your email before you can create tokens.") : null,
+    form,
+    h("p", { class: "auth-switch" }, "Already have an account? ", h("button", { class: "link-btn strong", type: "button", onclick: () => renderLogin() }, "Sign in")),
+  );
+  email.focus();
+}
+
+function renderCheckEmail(address) {
+  const resend = button("Send the link again", async () => {
+    resend.disabled = true;
+    try {
+      await api("POST", "/signup/resend", { email: address });
+      toast("Sent. Check your inbox and spam folder.");
+    } catch (e) {
+      toast(e.message);
+    }
+    setTimeout(() => (resend.disabled = false), 30000); // the server rate-limits too
+  }, { icon: "replay" });
+  authPage(
+    "Confirm your email",
+    h(
+      "div",
+      { class: "check-email" },
+      h("span", { class: "check-icon", "aria-hidden": "true" }, icon("mail")),
+      h("h1", { class: "check-title" }, "Check your inbox"),
+      h("p", { class: "auth-note" }, "We sent a confirmation link to ", h("strong", {}, address), ". It works for 24 hours."),
+    ),
+    h("div", { class: "form" }, resend, button("Back to sign in", () => renderLogin(), { kind: "primary" })),
+  );
 }
 
 function renderShell() {
   const nav = h(
     "nav",
     { class: "nav", "aria-label": "Sections" },
-    Object.entries(VIEWS).map(([key, v]) =>
+    Object.entries(views()).map(([key, v]) =>
       h(
         "button",
         { "data-view": key, onclick: () => go(key), "aria-current": state.view === key ? "page" : null },
@@ -248,7 +357,7 @@ function renderShell() {
     h("main", { id: "main" }),
   );
   document.getElementById("app").replaceChildren(h("div", { class: "shell" }, h("div", { class: "frame" }, topbar, page)));
-  go(location.hash.slice(1) in VIEWS ? location.hash.slice(1) : state.view);
+  go(location.hash.slice(1) in views() ? location.hash.slice(1) : state.view);
 }
 
 async function logout() {
@@ -269,7 +378,7 @@ function go(view) {
     if (b.dataset.view === view) b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
   });
-  document.getElementById("main").replaceChildren(head(VIEWS[view].title), h("p", { class: "muted" }, "Loading…"));
+  document.getElementById("main").replaceChildren(head(views()[view].title), h("p", { class: "muted" }, "Loading…"));
   refresh(true);
 }
 
@@ -282,7 +391,7 @@ async function refresh(first) {
   stopRefresh();
   const view = state.view;
   try {
-    const data = await VIEWS[view].load();
+    const data = await views()[view].load();
     if (state.view !== view || !state.user) return;
     state.data[view] = data;
     // Don't redraw underneath an open dialog or while the user is typing.
@@ -290,13 +399,13 @@ async function refresh(first) {
     if (first || (!document.querySelector("dialog[open]") && !typing)) draw();
   } catch (e) {
     if (e.status === 401) return;
-    if (first) document.getElementById("main").replaceChildren(head(VIEWS[view].title), h("div", { class: "error" }, e.message));
+    if (first) document.getElementById("main").replaceChildren(head(views()[view].title), h("div", { class: "error" }, e.message));
   }
-  if (state.user) state.timer = setTimeout(refresh, REFRESH_MS);
+  if (state.user && !views()[view].static) state.timer = setTimeout(refresh, REFRESH_MS);
 }
 
 function draw() {
-  const v = VIEWS[state.view];
+  const v = views()[state.view];
   const main = document.getElementById("main");
   if (!main) return;
   // A field marked data-keep keeps focus and caret through the re-render that
@@ -370,6 +479,8 @@ const ICONS = {
   alert: "M12 9v4M12 17h.01M10.3 3.9L2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
   chart: "M3 3v18h18M8 17v-5M13 17V8M18 17v-9",
   home: "M3 11l9-8 9 8M5 9.5V20h5v-6h4v6h5V9.5",
+  mail: "M3 5h18v14H3zM3 6l9 7 9-7",
+  shield: "M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z",
   left: "M15 18l-6-6 6-6",
   right: "M9 18l6-6-6-6",
 };
@@ -955,13 +1066,18 @@ function renderTokens(d) {
       trailing: tokenStatus(t),
       onclick: () => tokenSheet(t),
     });
+  const activeCount = d.tokens.filter((t) => !t.revoked_at).length;
+  // a user has a token limit and must confirm their email first
+  const own = state.role === "user";
+  const blocked = own && (!d.email_verified ? "Confirm your email to create tokens." : activeCount >= d.limit ? `You have ${d.limit} active tokens, the most allowed. Revoke one first.` : "");
   return [
     head(
       "Tokens",
-      `${d.tokens.filter((t) => !t.revoked_at).length} active of ${d.tokens.length} tokens`,
-      button("Create token", () => newTokenDialog(), { kind: "primary", icon: "plus" }),
+      own ? `${activeCount} of ${d.limit} active tokens used` : `${activeCount} active of ${d.tokens.length} tokens`,
+      button("Create token", () => newTokenDialog(), { kind: "primary", icon: "plus", disabled: !!blocked, hint: blocked || null }),
     ),
-    group(null, h("div", { class: "card toolbar" }, searchBox("tokens", "Search token, user or ID"))),
+    blocked ? h("div", { class: "notice" }, blocked) : null,
+    own ? null : group(null, h("div", { class: "card toolbar" }, searchBox("tokens", "Search token, user or ID"))),
     group("Active", paged("tokens-active", active, row, q ? `No active token matches “${q}”.` : "No active tokens yet."), null, total(active.length)),
     revoked.length ? group("Revoked", paged("tokens-revoked", revoked, row, ""), null, total(revoked.length)) : null,
   ];
@@ -1002,7 +1118,8 @@ function tokenForm(presetUser, onCreated) {
     h(
       "div",
       { class: "field-row" },
-      h("label", { class: "field" }, "User", h("span", { class: "pill-input" }, icon("user"), user)),
+      // a user creates tokens for themselves only: no user field
+      state.role === "user" ? null : h("label", { class: "field" }, "User", h("span", { class: "pill-input" }, icon("user"), user)),
       h("label", { class: "field" }, "Label", h("span", { class: "pill-input" }, icon("agents"), name)),
       btn,
     ),
@@ -1013,7 +1130,9 @@ function tokenForm(presetUser, onCreated) {
 // newTokenDialog(presetUser): the "New token" sheet. On success it is
 // replaced by the "Token created" sheet that shows the secret once.
 function newTokenDialog(presetUser) {
-  const { dlg, close } = sheet(presetUser ? "New token for " + presetUser : "New token", () => [
+  const own = state.role === "user";
+  if (own) presetUser = state.user;
+  const { dlg, close } = sheet(presetUser && !own ? "New token for " + presetUser : "New token", () => [
     group(null, tokenForm(presetUser, (r) => {
       close();
       sheet("Token created", () => tokenCreated(r), { onClose: () => refresh() });
@@ -1339,22 +1458,191 @@ async function requestDialog(id) {
   );
 }
 
+// ---- user pages (role "user") --------------------------------------------
+//
+// A self-registered user sees their own tunnels, subdomains, tokens and
+// requests, plus their account. Data comes from /api/v1/me.
+
+// verifyBanner: shown until the email address is confirmed; tokens cannot be
+// created before that.
+function verifyBanner(email) {
+  const resend = button("Send again", async () => {
+    resend.disabled = true;
+    try {
+      await api("POST", "/account/verify/resend");
+      toast("Sent. Check your inbox and spam folder.");
+    } catch (e) {
+      toast(e.message);
+    }
+    setTimeout(() => (resend.disabled = false), 30000);
+  }, { kind: "sm" });
+  return h(
+    "div",
+    { class: "banner" },
+    h("span", { class: "banner-icon", "aria-hidden": "true" }, icon("mail")),
+    h("div", { class: "cell-text" }, h("span", { class: "cell-title" }, "Confirm your email"), h("span", { class: "cell-subtitle" }, `We sent a link to ${email}. You can create tokens once it is confirmed.`)),
+    resend,
+  );
+}
+
+const limitText = (used, max) => `${fmtNum(used)} / ${fmtNum(max)}`;
+
+function renderMyOverview(o) {
+  const live = o.tunnels.slice().sort((x, y) => (y.active_connections || 0) - (x.active_connections || 0));
+  return [
+    head(`Hi, ${state.user}`, [h("span", { class: "mono muted" }, o.base_domain), live.length ? onlineBadge(`${live.length} online`) : h("span", { class: "badge" }, "offline")]),
+    o.email_verified ? null : verifyBanner(o.email),
+    group("Today", stats(
+      stat("Tunnels online", limitText(live.length, o.limits.tunnels), { icon: "link", onclick: () => go("tunnels") }),
+      stat("Requests", fmtNum(o.usage.day.requests), { icon: "activity", onclick: () => go("requests") }),
+      stat("Server errors", fmtNum(o.usage.day.errors), { icon: "alert", tone: o.usage.day.errors ? "danger" : null }),
+      stat("All time", fmtNum(o.usage.total.requests), { icon: "chart" }),
+    ), "Server errors are 5xx responses and requests your app never answered.", "last 24 hours"),
+    live.length
+      ? group(
+          "Online now",
+          [
+            ...live.slice(0, OVERVIEW_TUNNELS).map((t) => tunnelCell(t, "since " + ago(t.created_at).replace(" ago", ""))),
+            live.length > OVERVIEW_TUNNELS ? actions(button(`See all ${live.length}`, () => go("tunnels"), { icon: "arrow" })) : null,
+          ],
+          null,
+          total(live.length),
+        )
+      : group("Start a tunnel", clientSetup(), "Install mancar first: the Connect a client button at the top has the download link."),
+  ];
+}
+
+function renderMyTunnels(o) {
+  const custom = o.domains.filter((x) => x.kind === "custom").length;
+  const hit = (x) => matches("my-domains", x.hostname, x.kind);
+  const domains = o.domains.filter(hit).sort((x, y) => Number(y.online) - Number(x.online) || x.hostname.localeCompare(y.hostname));
+  const q = state.search["my-domains"];
+  const row = (x) =>
+    cell({
+      avatar: x.kind === "custom" ? "tag" : "link",
+      title: x.hostname.split(".")[0],
+      subtitle: `${x.hostname} · ${x.kind} · ${plural(x.usage.day.requests, "request")} today`,
+      monoSub: false,
+      trailing: x.online ? onlineBadge() : h("span", { class: "badge warn", title: fmtDate(x.hold_until) }, "frees " + ago(x.hold_until)),
+      onclick: () => mySubdomainSheet(x),
+    });
+  return [
+    head("Tunnels", `${o.tunnels.length} of ${o.limits.tunnels} online · ${custom} of ${o.limits.custom_domains} custom subdomains`),
+    group(
+      "Online",
+      o.tunnels.length ? o.tunnels.map((t) => tunnelCell(t, "since " + ago(t.created_at).replace(" ago", ""))) : empty("No tunnel is online. Start one with: mancar http 3000"),
+      null,
+      total(o.tunnels.length),
+    ),
+    group(null, h("div", { class: "card toolbar" }, searchBox("my-domains", "Search your subdomains"))),
+    group(
+      "Your subdomains",
+      paged("my-domains", domains, row, q ? `No subdomain matches “${q}”.` : "None yet. A subdomain is reserved the first time you open a tunnel with it."),
+      "A name stays yours while a tunnel uses it, then for 24 hours (custom) or 5 minutes (random) after it disconnects.",
+      domains.length === o.domains.length ? total(o.domains.length) : `${domains.length} of ${o.domains.length}`,
+    ),
+  ];
+}
+
+function mySubdomainSheet(x) {
+  sheet(x.hostname, (close) => [
+    group(null, stats(
+      stat("Today", fmtNum(x.usage.day.requests)),
+      stat("7 days", fmtNum(x.usage.week.requests)),
+      stat("All time", fmtNum(x.usage.total.requests)),
+    )),
+    group(null, [
+      cell({ avatar: x.kind === "custom" ? "tag" : "link", title: "Kind", value: x.kind }),
+      cell({ avatar: "eye", title: "Status", trailing: x.online ? onlineBadge() : h("span", { class: "badge warn" }, "held") }),
+      x.online ? null : cell({ avatar: "clock", title: "Held until", value: fmtDate(x.hold_until) }),
+    ]),
+    group("Public URL", codeBlock("https://" + x.hostname)),
+    x.online
+      ? null
+      : group(null, actions(button("Release subdomain", confirmThen({
+          title: `Release ${x.hostname.split(".")[0]}?`,
+          message: "Anyone can claim it afterwards, and it counts no more against your limit.",
+          action: "Release",
+        }, async () => {
+          await api("DELETE", `/domains/${encodeURIComponent(x.hostname)}`);
+          close();
+        }), { kind: "danger", icon: "trash" })), "Release a name you no longer need to free a custom slot."),
+  ]);
+}
+
+function renderAccount(a) {
+  const err = h("div", { class: "error", role: "alert", hidden: true });
+  const current = h("input", { name: "current", type: "password", autocomplete: "current-password", required: true });
+  const next = h("input", { name: "new", type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+  const save = h("button", { class: "btn primary", type: "submit" }, "Change password");
+  const pwForm = h(
+    "form",
+    {
+      class: "card form",
+      onsubmit: async (ev) => {
+        ev.preventDefault();
+        save.disabled = true;
+        err.hidden = true;
+        try {
+          await api("POST", "/account/password", { current: current.value, new: next.value });
+          current.value = next.value = "";
+          toast("Password changed. Other sessions are signed out.");
+        } catch (e) {
+          err.textContent = e.message;
+          err.hidden = false;
+        } finally {
+          save.disabled = false;
+        }
+      },
+    },
+    err,
+    h("label", {}, "Current password", current),
+    h("label", {}, h("span", {}, "New password ", h("span", { class: "label-hint" }, "· at least 10 characters")), next),
+    save,
+  );
+  return [
+    head("Account", `Member since ${new Date(a.created_at).toLocaleDateString()}`),
+    group(null, h(
+      "div",
+      { class: "card profile" },
+      avatar(initials(a.username)),
+      h("div", { class: "cell-text" }, h("span", { class: "profile-title" }, a.username), h("span", { class: "cell-subtitle" }, a.email)),
+      a.email_verified ? h("span", { class: "badge ok" }, icon("check"), "verified") : h("span", { class: "badge warn" }, "not confirmed"),
+    )),
+    a.email_verified ? null : verifyBanner(a.email),
+    group("Your limits", [
+      cell({ avatar: "link", title: "Tunnels at once", value: fmtNum(a.limits.tunnels) }),
+      cell({ avatar: "tokens", title: "Active tokens", value: fmtNum(a.limits.tokens) }),
+      cell({ avatar: "tag", title: "Custom subdomains", value: fmtNum(a.limits.custom_domains) }),
+    ], "Set by the gateway admin."),
+    group("Password", pwForm, "Changing it signs you out everywhere else. Your tokens keep working."),
+    group("Delete account", actions(button("Delete my account", confirmThen({
+      title: "Delete your account?",
+      message: "Your tokens, subdomains, captured requests and statistics are deleted and your agents disconnected. This cannot be undone.",
+      action: "Delete account",
+    }, async () => {
+      await api("DELETE", "/account");
+      state.user = null;
+      stopRefresh();
+      renderLogin();
+    }), { kind: "danger", icon: "trash" })), "Deleting is immediate and cannot be undone."),
+  ];
+}
+
 // ---- start -----------------------------------------------------------------
 
 window.addEventListener("hashchange", () => {
   const v = location.hash.slice(1);
-  if (state.user && v in VIEWS && v !== state.view) go(v);
+  if (state.user && v in views() && v !== state.view) go(v);
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (state.user && document.visibilityState === "visible") refresh();
+  if (state.user && document.visibilityState === "visible" && !views()[state.view].static) refresh();
 });
 
 (async function start() {
   try {
-    const s = await api("GET", "/session");
-    state.user = s.username;
-    renderShell();
+    signIn(await api("GET", "/session"));
   } catch (e) {
     renderLogin(e.status === 401 ? undefined : e.message);
   }

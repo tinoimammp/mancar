@@ -264,12 +264,68 @@
   const json = (body, status = 200) =>
     new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
+  // ---- who is signed in: ?as=admin (default) | user | unverified | guest ----
+  // guest shows the sign-in page with sign up open; signing in as "admin"
+  // opens the admin view, anything else the user view.
+  const as = new URLSearchParams(location.search).get("as") || "admin";
+  let session = as === "guest" ? null : as === "admin" ? { username: "preview", role: "admin" } : { username: "tino", role: "user" };
+  let verified = as !== "unverified";
+
+  // the user "tino": the agents above that belong to tino
+  const mine = agents.filter((a) => a.username === "tino");
+  const myTunnels = mine.flatMap((a) => a.tunnels);
+  const myDomains = [
+    ...myTunnels.filter((t) => t.proto === "http").map((t, i) => ({
+      hostname: t.hostname, kind: i % 2 ? "random" : "custom", online: true, usage: usage(1200 - i * 300, 7400, 61000),
+    })),
+    { hostname: `demo.${host}`, kind: "custom", online: false, hold_until: new Date(now + 6e6).toISOString(), usage: usage(0, 420, 5200) },
+    { hostname: `quiet-otter.${host}`, kind: "random", online: false, hold_until: new Date(now + 2.4e5).toISOString(), usage: usage(12, 80, 300) },
+  ];
+  const limits = { tunnels: 3, tokens: 3, custom_domains: 3 };
+  const me = {
+    "/overview": () => ({
+      base_domain: host, email: "tino@example.com", email_verified: verified, limits,
+      tunnels: myTunnels, domains: myDomains, usage: usage(2650, 15800, 128400),
+    }),
+    "/tokens": () => ({ email_verified: verified, limit: limits.tokens, tokens: tokens.filter((t) => t.username === "tino") }),
+    "/account": () => ({ username: "tino", email: "tino@example.com", email_verified: verified, created_at: at(30 * 1440), limits }),
+    "/requests": () => ({
+      retention_seconds: 86400, max_body_bytes: 65536, undecryptable: 0,
+      requests: allRequests.filter((r) => myTunnels.some((t) => t.hostname === r.hostname)),
+    }),
+  };
+
   window.fetch = async (input, init = {}) => {
     const url = new URL(String(input), location.href);
-    if (!url.pathname.startsWith("/api/v1/admin")) return realFetch(input, init);
-    const path = url.pathname.replace("/api/v1/admin", "");
+    const isMe = url.pathname.startsWith("/api/v1/me");
+    if (!url.pathname.startsWith("/api/v1/admin") && !isMe) return realFetch(input, init);
+    const path = url.pathname.replace(/^\/api\/v1\/(admin|me)/, "");
     const method = (init.method || "GET").toUpperCase();
+    const body = JSON.parse(init.body || "{}");
     await new Promise((r) => setTimeout(r, 250)); // let busy states show
+
+    // sign in, sign up, session
+    if (path === "/session") return session ? json(session) : json({ error: { code: "unauthorized", message: "sign in" } }, 401);
+    if (path === "/signup/options") return json({ enabled: true, verify_email: true });
+    if (path === "/login") {
+      session = body.username === "admin" ? { username: "admin", role: "admin" } : { username: "tino", role: "user" };
+      return json(session);
+    }
+    if (path === "/signup") {
+      if (body.username === "taken") return json({ error: { code: "conflict", message: "That username is taken." } }, 409);
+      verified = false;
+      return json({ username: body.username, role: "user", verify_email: true }, 201);
+    }
+    if (path === "/logout") {
+      session = null;
+      return json(null, 204);
+    }
+    if (path === "/signup/resend" || path === "/account/verify/resend") return json(null, 204);
+    if (path === "/account/password") {
+      if (body.current !== "password123") return json({ error: { code: "bad_password", message: "The current password is wrong (preview: it is password123)." } }, 400);
+      return json(null, 204);
+    }
+    if (isMe && method === "GET" && me[path]) return json(me[path]());
 
     if (method === "GET") {
       const m = path.match(/^\/requests\/(.+)$/);
@@ -280,12 +336,10 @@
       return json(get[path] || {});
     }
     if (path === "/tokens") {
-      const body = JSON.parse(init.body || "{}");
       return json({ id: "t9", user: body.user, name: body.name || "dashboard", token: "mc_" + "0123456789abcdef".repeat(4) }, 201);
     }
     if (path.endsWith("/replay")) return json({ status: 200, duration_ms: 444, response_size: 512 });
     if (path.endsWith("/revoke")) return json({ disconnected_agents: 1 });
-    if (path === "/logout") return json(null, 204);
     return json(method === "DELETE" ? { deleted: 0, disconnected_agents: 0 } : null, method === "DELETE" ? 200 : 204);
   };
 })();

@@ -9,6 +9,7 @@
   static/app.js with fake data, no gateway and no login. Never embedded in the
   binary (only static/ is). Run: make dashboard-preview
   Theme: ?theme=light | ?theme=dark | (none) follows the system.
+  Role: ?as=admin (default) | user | unverified | guest (sign in and sign up).
   ?click=N opens the Nth clickable row, e.g. a detail sheet.
 -->
 <script src="mock.js"></script>
@@ -29,12 +30,24 @@
 </head>
 <body>
 <div id="app"></div>
-<nav class="preview-bar" aria-label="Preview theme">
-  preview:
+<nav class="preview-bar" aria-label="Preview">
+  as:
+  <a href="?as=admin">admin</a>
+  <a href="?as=user">user</a>
+  <a href="?as=unverified">unverified</a>
+  <a href="?as=guest">sign in / up</a>
+  · theme:
   <a href="?theme=light">light</a>
   <a href="?theme=dark">dark</a>
-  <a href="?theme=system">system</a>
 </nav>
+<script>
+  // keep the other preview setting when switching one (as=… keeps theme, and back)
+  document.querySelectorAll(".preview-bar a").forEach((a) => {
+    const next = new URLSearchParams(location.search);
+    for (const [k, v] of new URL(a.href).searchParams) next.set(k, v);
+    a.href = "?" + next + location.hash;
+  });
+</script>
 <style>
   /* preview chrome only: not part of the design system */
   .preview-bar { position: fixed; right: 8px; bottom: 8px; z-index: 99; font: 12px system-ui; padding: 4px 8px;
