@@ -23,6 +23,7 @@ import (
 	"github.com/tinoimammp/mancar/internal/agent"
 	"github.com/tinoimammp/mancar/internal/domain"
 	"github.com/tinoimammp/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/server"
 )
 
 type echo struct {
@@ -242,12 +243,29 @@ func TestReconnectAfterNetworkInterruption(t *testing.T) {
 // stream). The gateway treats the upgraded stream as opaque bytes, so this
 // covers WebSocket without needing a WebSocket library.
 func TestWebSocketUpgradeForwarding(t *testing.T) {
-	e := newEnv(t, nil)
+	checkWebSocket(t, newEnv(t, nil))
+}
+
+// The inspector, traffic statistics and request log all hook into the proxy
+// path; WebSocket upgrades must keep working with every one of them on.
+func TestWebSocketWithAllFeaturesOn(t *testing.T) {
+	e := newEnvWith(t, map[string]string{"ENCRYPTION_KEY": strings.Repeat("ab", 32)}, func(d *server.Deps) {
+		d.Captures = &captureStore{}
+		d.Usage = &usageStore{}
+	})
+	checkWebSocket(t, e)
+}
+
+func checkWebSocket(t *testing.T, e *env) {
+	t.Helper()
+	type seen struct{ host, origin, fwdHost string }
+	got := make(chan seen, 1)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || r.Header.Get("Sec-WebSocket-Key") == "" {
 			http.Error(w, "expected websocket upgrade", http.StatusBadRequest)
 			return
 		}
+		got <- seen{r.Host, r.Header.Get("Origin"), r.Header.Get("X-Forwarded-Host")}
 		conn, brw, err := http.NewResponseController(w).Hijack()
 		if err != nil {
 			return
@@ -275,8 +293,9 @@ func TestWebSocketUpgradeForwarding(t *testing.T) {
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	fmt.Fprintf(conn, "GET /socket HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"+
-		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", tun.Hostname)
+	origin := "https://" + tun.Hostname
+	fmt.Fprintf(conn, "GET /_next/hmr?id=abc HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"+
+		"Origin: %s\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", tun.Hostname, origin)
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
@@ -284,6 +303,10 @@ func TestWebSocketUpgradeForwarding(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols || resp.Header.Get("Sec-WebSocket-Accept") != "test" {
 		t.Fatalf("upgrade response: %d %v", resp.StatusCode, resp.Header)
+	}
+	// Dev servers (Next.js allowedDevOrigins, Vite) check Host and Origin.
+	if s := <-got; s.host != tun.Hostname || s.origin != origin || s.fwdHost != tun.Hostname {
+		t.Errorf("the local app saw host=%q origin=%q x-forwarded-host=%q", s.host, s.origin, s.fwdHost)
 	}
 	if line, _ := br.ReadString('\n'); line != "server-first\n" {
 		t.Fatalf("server push: %q", line)
