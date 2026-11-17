@@ -5,6 +5,20 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 `mancard` gateway for Linux, and the Docker images
 `ghcr.io/tinoimammp/mancar` and `ghcr.io/tinoimammp/mancar-edge`.
 
+## [Unreleased]
+
+### Changed
+- Redesigned dashboard: a floating header with a light / dark switch,
+  section tabs with icons, stat cards and cleaner detail sheets.
+- Agents, requests, users, tokens and domains lists are paged, and agents,
+  users, tokens and domains can be searched. Agents can be filtered to the
+  ones with open connections.
+- Commands, tokens, curl commands and request bodies show in code blocks
+  with a Copy button; headers show as a compact name / value table.
+- Confirmations (revoke, delete, disconnect, replay) use an in-page dialog
+  instead of the browser's.
+- Tokens are created from a **Create token** dialog.
+
 ## [v0.3.2] - 2026-11-15
 
 ### Added
