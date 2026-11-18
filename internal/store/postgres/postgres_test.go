@@ -139,10 +139,13 @@ func TestMigrate_CreatesSchemaAndIsIdempotent(t *testing.T) {
 			t.Fatalf("Migrate run %d: %v", i+1, err)
 		}
 	}
-	for _, table := range []string{"users", "agent_tokens", "domains", "admins", "captured_requests", "usage_hourly", "usage_daily", "usage_total", "schema_migrations"} {
+	for _, table := range []string{"users", "agent_tokens", "domains", "email_tokens", "audit_log", "captured_requests", "usage_hourly", "usage_daily", "usage_total", "schema_migrations"} {
 		if n := count(t, st, `SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1`, table); n != 1 {
 			t.Errorf("table %s missing", table)
 		}
+	}
+	if n := count(t, st, `SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'admins'`); n != 0 {
+		t.Error("table admins should be gone (merged into users by 0006)")
 	}
 	if n := count(t, st, `SELECT count(*) FROM schema_migrations`); n < 1 {
 		t.Errorf("schema_migrations has %d rows", n)
