@@ -54,6 +54,11 @@ type Config struct {
 	InspectRetention time.Duration
 	InspectMaxBody   int
 	InspectMaxRows   int
+
+	// Web sign up (needs PostgreSQL and SMTP_URL: the address is confirmed
+	// by email). SMTPURL also enables "forgot password" when sign up is off.
+	RegisterEnabled bool
+	SMTPURL         string
 }
 
 // Error lists every configuration problem found.
@@ -223,6 +228,28 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.InspectMaxRows = getInt("INSPECT_MAX_ROWS", 50_000, 1)
 	if c.InspectMaxBody > 1<<20 {
 		bad("INSPECT_MAX_BODY_BYTES must be at most 1048576 (1 MiB)")
+	}
+
+	switch v := strings.ToLower(get("REGISTER_ENABLED", "false")); v {
+	case "on", "true", "1":
+		c.RegisterEnabled = true
+	case "off", "false", "0":
+	default:
+		bad("REGISTER_ENABLED must be true or false (got %q)", v)
+	}
+	c.SMTPURL = get("SMTP_URL", "")
+	if c.SMTPURL != "" {
+		if u, err := url.Parse(c.SMTPURL); err != nil || (u.Scheme != "smtp" && u.Scheme != "smtps") || u.Hostname() == "" {
+			bad("SMTP_URL must look like smtps://user:password@smtp.example.com:465 or smtp://user:password@smtp.example.com:587 (URL-encode special characters in the password)")
+		}
+	}
+	if c.RegisterEnabled {
+		if c.SMTPURL == "" {
+			bad("REGISTER_ENABLED=true needs SMTP_URL: new accounts confirm their email address")
+		}
+		if c.Storage != "postgres" {
+			bad("REGISTER_ENABLED=true needs STORAGE=postgres")
+		}
 	}
 
 	if len(problems) > 0 {

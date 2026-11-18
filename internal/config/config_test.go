@@ -433,3 +433,41 @@ func TestConfig_PublicURL(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_RegisterIsOffByDefault(t *testing.T) {
+	c := mustLoad(t, prodEnv())
+	if c.RegisterEnabled || c.SMTPURL != "" {
+		t.Errorf("sign up must be off by default: %+v", c)
+	}
+}
+
+func TestLoad_RegisterNeedsSMTPAndPostgres(t *testing.T) {
+	ce := loadErr(t, prodEnv().with("REGISTER_ENABLED", "true"))
+	if !hasProblem(ce, "needs SMTP_URL") {
+		t.Errorf("problems: %v", ce.Problems)
+	}
+	c := mustLoad(t, prodEnv().with("REGISTER_ENABLED", "true").with("SMTP_URL", "smtps://resend:re_x@smtp.resend.com:465"))
+	if !c.RegisterEnabled || c.SMTPURL == "" {
+		t.Errorf("config: %+v", c)
+	}
+	ce = loadErr(t, devEnv().with("REGISTER_ENABLED", "true").with("SMTP_URL", "smtp://localhost:1025"))
+	if !hasProblem(ce, "needs STORAGE=postgres") {
+		t.Errorf("problems: %v", ce.Problems)
+	}
+	ce = loadErr(t, prodEnv().with("REGISTER_ENABLED", "maybe"))
+	if !hasProblem(ce, "REGISTER_ENABLED must be true or false") {
+		t.Errorf("problems: %v", ce.Problems)
+	}
+}
+
+func TestLoad_SMTPURLIsValidated(t *testing.T) {
+	for _, bad := range []string{"http://mail.example.com", "smtps://", "mail.example.com:587"} {
+		ce := loadErr(t, prodEnv().with("SMTP_URL", bad))
+		if !hasProblem(ce, "SMTP_URL must look like") {
+			t.Errorf("%q: problems %v", bad, ce.Problems)
+		}
+	}
+	if c := mustLoad(t, prodEnv().with("SMTP_URL", "smtp://user:p%40ss@mail.example.com:587")); c.RegisterEnabled {
+		t.Error("SMTP_URL alone must not open sign up")
+	}
+}
