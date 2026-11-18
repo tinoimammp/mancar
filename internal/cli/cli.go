@@ -49,6 +49,11 @@ type Env struct {
 	Executable  func() (string, error) // path of the running binary
 	GOOS        string                 // default runtime.GOOS
 	GOARCH      string                 // default runtime.GOARCH
+
+	// "mancar login": OpenBrowser opens the approval page (nil: print only);
+	// LoginPoll overrides the server's polling interval (tests).
+	OpenBrowser func(url string) error
+	LoginPoll   time.Duration
 }
 
 // OSEnv returns an Env backed by the real process.
@@ -62,6 +67,7 @@ func OSEnv() Env {
 	} else if d, err := os.UserConfigDir(); err == nil {
 		e.ConfigDir = filepath.Join(d, "mancar")
 	}
+	e.OpenBrowser = openBrowser
 	e.ReleasesURL = DefaultReleasesURL
 	if u := os.Getenv("MANCAR_RELEASES_URL"); u != "" {
 		e.ReleasesURL = u
@@ -108,6 +114,7 @@ func (e Env) withDefaults() Env {
 const usageText = `mancar - expose local services through your own tunnel gateway
 
 Usage:
+  mancar login [SERVER] [--name NAME]  sign this computer in from the dashboard (saves a token)
   mancar http PORT|HOST:PORT [--subdomain NAME | --random | --last]
   mancar tcp  PORT|HOST:PORT
   mancar start [NAME...]            start the tunnels saved with "config add-tunnel"
@@ -132,7 +139,8 @@ Environment:
   MANCAR_TOKEN             agent token (overrides the config file)
   MANCAR_NO_UPDATE_CHECK=1 do not look for or announce new releases
 
-Ask your gateway operator for a token: mancard token create --user NAME
+Easiest start: mancar login https://tunnel.example.com
+Or ask your gateway operator for a token: mancard token create --user NAME
 `
 
 // Main runs one command and returns the process exit code.
@@ -149,6 +157,8 @@ func Main(ctx context.Context, args []string, e Env) int {
 		e.noticeFromCache() // one line, from the cache: never slows a command down
 	}
 	switch cmd {
+	case "login":
+		return cmdLogin(ctx, e, rest)
 	case "http", "tcp":
 		return cmdTunnel(ctx, e, cmd, rest)
 	case "start":
