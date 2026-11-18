@@ -216,12 +216,27 @@
   const users = [...names, ...extraUsers].map((username, i) => {
     const mine = agents.filter((a) => a.username === username);
     const reqs = mine.reduce((n, a) => n + a.tunnels.reduce((m, t) => m + (t.active_connections || 0), 0), 0) * 900 + (i * 137) % 600;
+    const status = i % 7 === 5 ? "disabled" : i % 5 === 4 ? "unverified" : "active";
+    const signedUp = i % 3 !== 0;
     return {
-      id: "u" + (i + 1), username, created_at: at(3000 + i * 1440),
+      id: "u" + (i + 1), username, email: i % 6 === 2 ? "" : `${username}@example.com`,
+      role: username === "tino" || username === "rina" ? "admin" : "user",
+      status, email_verified: status !== "unverified", has_password: i % 6 !== 2, signed_up: signedUp,
+      created_at: at(3000 + i * 1440), last_login_at: i % 4 === 3 ? null : at(30 + i * 97),
       active_tokens: Math.max(mine.length, i % 3 === 0 ? 0 : 1), domains: mine.reduce((n, a) => n + a.tunnels.length, 0),
-      connected_agents: mine.length, usage: usage(reqs, reqs * 6, reqs * 40 + 1200),
+      custom_domains: Math.min(3, mine.reduce((n, a) => n + a.tunnels.length, 0)),
+      connected_agents: status === "disabled" ? 0 : mine.length,
+      max_tokens: signedUp ? 3 : null, max_custom_domains: signedUp ? 3 : null,
+      usage: usage(reqs, reqs * 6, reqs * 40 + 1200),
     };
   });
+  const audit = [
+    ["preview", "user.role", "rina", "user → admin"], ["preview", "user.disable", "gilang", "1 agent(s) disconnected"],
+    ["tino", "token.create", "tino", "pc-rumah"], ["preview", "user.limits", "budi", "tokens 5, custom subdomains 3"],
+    ["preview", "user.reset_password", "andi", "link emailed"], ["budi", "token.revoke", "t4", "1 agent(s) disconnected"],
+    ["preview", "domain.release", `old-shop.${host}`, ""], ["preview", "user.create", "rina", "role user"],
+    ["sari", "account.password", "sari", ""], ["preview", "request.replay", `shop-api.${host}`, "POST /v1/orders → 201"],
+  ].map(([actor, action, target, detail], i) => ({ at: at(3 + i * 41), actor, action, target, detail }));
 
   const tokens = [
     ...agents.map((a, i) => ({
@@ -256,7 +271,8 @@
     },
     "/agents": { agents },
     "/tokens": { tokens },
-    "/users": { users },
+    "/users": { users, email_enabled: true },
+    "/audit": { entries: audit },
     "/domains": { domains },
     "/requests": { retention_seconds: 86400, max_body_bytes: 65536, undecryptable: 0, requests: allRequests },
   };
@@ -268,7 +284,7 @@
   // guest shows the sign-in page with sign up open; signing in as "admin"
   // opens the admin view, anything else the user view.
   const as = new URLSearchParams(location.search).get("as") || "admin";
-  let session = as === "guest" ? null : as === "admin" ? { username: "preview", role: "admin" } : { username: "tino", role: "user" };
+  let session = as === "guest" || as === "setup" ? null : as === "admin" ? { username: "preview", role: "admin" } : { username: "tino", role: "user" };
   let verified = as !== "unverified";
 
   // the user "tino": the agents above that belong to tino
@@ -287,8 +303,10 @@
       base_domain: host, email: "tino@example.com", email_verified: verified, limits,
       tunnels: myTunnels, domains: myDomains, usage: usage(2650, 15800, 128400),
     }),
-    "/tokens": () => ({ email_verified: verified, limit: limits.tokens, tokens: tokens.filter((t) => t.username === "tino") }),
-    "/account": () => ({ username: "tino", email: "tino@example.com", email_verified: verified, created_at: at(30 * 1440), limits }),
+    "/tokens": () => ({ email_verified: verified, limit: limits.tokens, tokens: tokens.filter((t) => t.username === "tino" && !t.revoked_at) }),
+    "/account": () => (session && session.role === "admin"
+      ? { username: session.username, email: "", email_verified: true, role: "admin", created_at: at(90 * 1440), limits: { tunnels: 100, tokens: null, custom_domains: null } }
+      : { username: "tino", email: "tino@example.com", email_verified: verified, role: "user", created_at: at(30 * 1440), limits }),
     "/requests": () => ({
       retention_seconds: 86400, max_body_bytes: 65536, undecryptable: 0,
       requests: allRequests.filter((r) => myTunnels.some((t) => t.hostname === r.hostname)),
@@ -298,23 +316,37 @@
   window.fetch = async (input, init = {}) => {
     const url = new URL(String(input), location.href);
     const isMe = url.pathname.startsWith("/api/v1/me");
-    if (!url.pathname.startsWith("/api/v1/admin") && !isMe) return realFetch(input, init);
-    const path = url.pathname.replace(/^\/api\/v1\/(admin|me)/, "");
+    if (!/^\/api\/v1\/(admin|me|auth)\//.test(url.pathname)) return realFetch(input, init);
+    const path = url.pathname.replace(/^\/api\/v1\/(admin|me|auth)/, "");
     const method = (init.method || "GET").toUpperCase();
     const body = JSON.parse(init.body || "{}");
     await new Promise((r) => setTimeout(r, 250)); // let busy states show
 
     // sign in, sign up, session
     if (path === "/session") return session ? json(session) : json({ error: { code: "unauthorized", message: "sign in" } }, 401);
-    if (path === "/signup/options") return json({ enabled: true, verify_email: true });
+    if (path === "/options") {
+      const setup = as === "setup" && !session;
+      return json({ setup, signup: true, password_reset: true, ...(setup ? { version: "v0.4.0" } : {}) });
+    }
+    if (path === "/setup") {
+      session = { username: body.username, role: "admin" };
+      return json({ ...session, email: body.email, email_verified: true }, 201);
+    }
+    if (path === "/signup/verify") {
+      verified = true;
+      return json({ verified: true });
+    }
+    if (path === "/password/forgot") return json(null, 204);
+    if (path === "/password/reset") return json(null, 204);
     if (path === "/login") {
+      if (body.password === "wrong") return json({ error: { code: "invalid_credentials", message: "wrong username, email or password" } }, 401);
       session = body.username === "admin" ? { username: "admin", role: "admin" } : { username: "tino", role: "user" };
       return json(session);
     }
     if (path === "/signup") {
       if (body.username === "taken") return json({ error: { code: "conflict", message: "That username is taken." } }, 409);
       verified = false;
-      return json({ username: body.username, role: "user", verify_email: true }, 201);
+      return json({ verify_email: true }, 202);
     }
     if (path === "/logout") {
       session = null;
@@ -325,6 +357,8 @@
       if (body.current !== "password123") return json({ error: { code: "bad_password", message: "The current password is wrong (preview: it is password123)." } }, 400);
       return json(null, 204);
     }
+    const dev = path.match(/^\/device\/([A-Z0-9-]+)(\/(approve|deny))?$/i);
+    if (dev) return dev[2] ? json(null, 204) : json({ user_code: dev[1].toUpperCase(), name: "MacBook-Pro-Tino", created_at: at(0.2) });
     if (isMe && method === "GET" && me[path]) return json(me[path]());
 
     if (method === "GET") {

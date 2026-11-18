@@ -3,11 +3,13 @@
 "use strict";
 
 // Two roles share this app. An admin manages the whole gateway through
-// /api/v1/admin; a user (self-registered) sees only their own tunnels,
-// tokens and requests through /api/v1/me. Sign-in paths are shared.
+// /api/v1/admin; a user sees only their own tunnels, tokens and requests
+// through /api/v1/me. Sign in, sign up and email links are /api/v1/auth.
 const API = "/api/v1/admin";
 const ME_API = "/api/v1/me";
-const AUTH_PATHS = new Set(["/login", "/logout", "/session", "/signup", "/signup/options"]);
+const AUTH_API = "/api/v1/auth";
+const AUTH_PATHS = new Set(["/login", "/logout", "/session", "/options", "/setup", "/signup", "/signup/verify", "/signup/resend", "/password/forgot", "/password/reset"]);
+const MIN_PASSWORD = 12; // the server's MinPasswordLength
 const REFRESH_MS = 5000;
 const OVERVIEW_TUNNELS = 6; // the overview lists the busiest few; the Agents page has them all
 // Page sizes. Lists come whole from the API and are paged here; requests are
@@ -20,7 +22,9 @@ const ROWS_PER_PAGE = 15; // users, tokens, domains
 const state = {
   user: null, role: "admin", view: "overview", data: {}, timer: null, reqHost: "",
   agentQuery: "", agentShow: "all", // agents page: search and filter
+  userShow: "all", // users page: role / status filter
   pages: {}, // current page per paginated list
+  pendingDevice: null, // a "mancar login" code from #device=, shown after sign in
   search: {}, // search text per list page (tokens, users, domains)
 };
 
@@ -101,7 +105,8 @@ async function api(method, path, body) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const base = AUTH_PATHS.has(path) || state.role !== "user" ? API : ME_API;
+  // a full /api/... path is used as is (an admin's own account lives under /me)
+  const base = path.startsWith("/api/") ? "" : AUTH_PATHS.has(path) ? AUTH_API : state.role === "user" ? ME_API : API;
   const res = await fetch(base + path, opts);
   if (res.status === 204) return null;
   let json = null;
@@ -131,7 +136,12 @@ const VIEWS = {
   tokens: { title: "Tokens", icon: "tokens", load: () => api("GET", "/tokens"), render: renderTokens },
   users: { title: "Users", icon: "user", load: () => api("GET", "/users"), render: renderUsers },
   domains: { title: "Domains", icon: "domains", load: () => api("GET", "/domains"), render: renderDomains },
+  activity: { title: "Activity", icon: "clock", load: () => api("GET", "/audit"), render: renderActivity },
+  account: { title: "Account", icon: "shield", load: () => api("GET", own("/account")), render: renderAccount, static: true },
 };
+
+// own(path): an endpoint of the signed-in account itself, for either role.
+const own = (path) => (state.role === "user" ? path : ME_API + path);
 
 // What a signed-in user (not an admin) sees: only their own things. The
 // paths resolve under /api/v1/me (see api()).
@@ -141,7 +151,7 @@ const USER_VIEWS = {
   requests: { title: "Requests", icon: "activity", load: loadRequests, render: renderRequests },
   tokens: { title: "Tokens", icon: "tokens", load: () => api("GET", "/tokens"), render: renderTokens },
   // static: no auto-refresh, so a half-typed password is never wiped
-  account: { title: "Account", icon: "user", load: () => api("GET", "/account"), render: renderAccount, static: true },
+  account: { title: "Account", icon: "shield", load: () => api("GET", own("/account")), render: renderAccount, static: true },
 };
 
 const views = () => (state.role === "user" ? USER_VIEWS : VIEWS);
@@ -154,6 +164,42 @@ function signIn(s) {
   state.data = {};
   if (!(state.view in views())) state.view = "overview";
   renderShell();
+  if (state.pendingDevice) deviceDialog();
+}
+
+// deviceDialog: "mancar login" in a terminal waits for this. It shows the
+// device name and code so the person can check they match their terminal.
+async function deviceDialog() {
+  const code = state.pendingDevice;
+  state.pendingDevice = null;
+  let dev;
+  try {
+    dev = await api("GET", own(`/device/${encodeURIComponent(code)}`));
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  sheet("Sign in a device", (close) => [
+    group(null, h(
+      "div",
+      { class: "card profile" },
+      avatar(icon("terminal")),
+      h("div", { class: "cell-text" }, h("span", { class: "profile-title" }, dev.name), h("span", { class: "cell-subtitle" }, `wants to use mancar as ${state.user}`)),
+    )),
+    group("Code in your terminal", h("div", { class: "card device-code" }, dev.user_code), "Allow only if this matches the code mancar login printed. Allowing creates a token for this device; revoke it any time under Tokens."),
+    group(null, actions(
+      button("Deny", async () => {
+        await api("POST", own(`/device/${encodeURIComponent(dev.user_code)}/deny`)).catch(() => {});
+        close();
+        toast("Denied");
+      }, { icon: "ban" }),
+      button("Allow", confirmThen({ title: `Allow ${dev.name}?`, message: "It can open tunnels as you until you revoke its token.", action: "Allow", danger: false }, async () => {
+        await api("POST", own(`/device/${encodeURIComponent(dev.user_code)}/approve`));
+        close();
+        toast("Allowed. Go back to your terminal.");
+      }), { kind: "primary", icon: "check" }),
+    )),
+  ]);
 }
 
 async function loadOverview() {
@@ -178,21 +224,21 @@ function authPage(sub, ...content) {
   );
 }
 
-// signupOptions: what the gateway allows (REGISTER_ENABLED,
-// REGISTER_VERIFY_EMAIL). Older gateways have no such endpoint: no sign up.
-async function signupOptions() {
+// authOptions: what the gateway offers on the sign in page (sign up open,
+// "forgot password" available). Older gateways answer 404: neither.
+async function authOptions() {
   try {
-    return await api("GET", "/signup/options");
+    return await api("GET", "/options");
   } catch {
-    return { enabled: false, verify_email: false };
+    return { signup: false, password_reset: false };
   }
 }
 
-function renderLogin(message) {
-  const err = h("div", { class: "error", role: "alert", hidden: !message }, message || "");
-  const user = h("input", { name: "username", autocomplete: "username", required: true, autofocus: true });
-  const pass = h("input", { name: "password", type: "password", autocomplete: "current-password", required: true });
-  const btn = h("button", { class: "btn primary", type: "submit" }, "Log in");
+// busyForm(fields, label, submit): a sign-in style form whose button shows
+// a spinner while submit runs; a thrown error is shown above the fields.
+function busyForm(fields, label, submit) {
+  const err = h("div", { class: "error", role: "alert", hidden: true });
+  const btn = h("button", { class: "btn primary", type: "submit" }, label);
   const form = h(
     "form",
     {
@@ -203,12 +249,10 @@ function renderLogin(message) {
         btn.setAttribute("aria-busy", "true");
         err.hidden = true;
         try {
-          signIn(await api("POST", "/login", { username: user.value, password: pass.value }));
+          await submit();
         } catch (e) {
           err.textContent = e.message;
           err.hidden = false;
-          pass.value = "";
-          pass.focus();
         } finally {
           btn.disabled = false;
           btn.removeAttribute("aria-busy");
@@ -216,76 +260,175 @@ function renderLogin(message) {
       },
     },
     err,
-    h("label", {}, "Email or username", user),
-    h("label", {}, "Password", pass),
+    fields,
     btn,
   );
-  // filled once the gateway says whether sign up is open
+  return form;
+}
+
+const passwordInput = (name = "password") =>
+  h("input", { name, type: "password", autocomplete: name === "password" ? "current-password" : "new-password", required: true, minlength: name === "password" ? null : MIN_PASSWORD });
+
+const passwordLabel = (text, input) => h("label", {}, h("span", {}, text + " ", h("span", { class: "label-hint" }, `· at least ${MIN_PASSWORD} characters`)), input);
+
+const switchLink = (text, label, onclick) => h("p", { class: "auth-switch" }, text, h("button", { class: "link-btn strong", type: "button", onclick }, label));
+
+function renderLogin(message) {
+  const user = h("input", { name: "username", autocomplete: "username", required: true, autofocus: true });
+  const pass = passwordInput();
+  const form = busyForm([h("label", {}, "Email or username", user), h("label", {}, "Password", pass)], "Log in", async () => {
+    try {
+      signIn(await api("POST", "/login", { username: user.value, password: pass.value }));
+    } catch (e) {
+      pass.value = "";
+      pass.focus();
+      throw e;
+    }
+  });
+  if (message) {
+    const err = form.querySelector(".error");
+    err.textContent = message;
+    err.hidden = false;
+  }
+  // filled once the gateway says what it offers
+  const forgot = h("div", { class: "auth-forgot" });
   const footer = h("div", { class: "auth-footer" });
-  authPage("Sign in to the tunnel dashboard", form, footer);
+  authPage("Sign in to the tunnel dashboard", form, forgot, footer);
   user.focus();
-  signupOptions().then((o) =>
+  authOptions().then((o) => {
+    if (o.setup) {
+      state.setupVersion = o.version || ""; // shown in the wizard's panel
+      return renderSetup(); // a fresh server: no admin yet
+    }
+    if (o.password_reset) forgot.replaceChildren(h("button", { class: "link-btn", type: "button", onclick: () => renderForgot() }, "Forgot password?"));
     footer.replaceChildren(
-      ...(o.enabled
-        ? [h("p", { class: "auth-switch" }, "No account yet? ", h("button", { class: "link-btn strong", type: "button", onclick: () => renderSignup(o) }, "Create one"))]
-        : [h("p", { class: "muted small login-hint" }, "No account? Ask the admin, or on the server run:"), codeBlock("mancard admin set --user NAME")]),
+      ...(o.signup
+        ? [switchLink("No account yet? ", "Create one", () => renderSignup())]
+        : [h("p", { class: "muted small login-hint" }, "No account? Ask the admin, or on the server run:"), codeBlock("mancard user create NAME")]),
+    );
+  });
+}
+
+// ---- first-run setup wizard --------------------------------------------------
+//
+// A fresh gateway has no admin; whoever opens it first creates one (the
+// server closes setup as soon as an admin exists). Three steps:
+//   1 Welcome  2 Admin account (username, email, password; signs in)  3 Done
+
+const SETUP_STEPS = [
+  ["Welcome", "What this is"],
+  ["Admin account", "Username, email and password"],
+  ["Done", "Open the dashboard"],
+];
+
+// setupPage(step, ...content): one wide card in two parts: a blue panel on
+// the left with the logo and the steps, the current step on the right. On
+// phones the panel becomes a header with the steps in a row.
+function setupPage(step, ...content) {
+  const steps = h(
+    "ol",
+    { class: "steps", "aria-label": `Step ${step + 1} of ${SETUP_STEPS.length}` },
+    SETUP_STEPS.map(([label, hint], i) =>
+      h(
+        "li",
+        { class: i < step ? "done" : i === step ? "current" : "", "aria-current": i === step ? "step" : null },
+        h("span", { class: "step-dot", "aria-hidden": "true" }, i < step ? icon("check") : String(i + 1)),
+        h("span", { class: "step-text" }, h("span", { class: "step-label" }, label), h("span", { class: "step-hint" }, hint)),
+      ),
+    ),
+  );
+  document.getElementById("app").replaceChildren(
+    h(
+      "div",
+      { class: "setup" },
+      h(
+        "div",
+        { class: "setup-card" },
+        h(
+          "aside",
+          { class: "setup-panel" },
+          h("div", { class: "brand" }, LOGO(), h("span", { class: "brand-text" }, h("span", { class: "brand-name" }, "mancar"), h("span", { class: "brand-sub" }, "Set up your tunnel server"))),
+          steps,
+          state.setupVersion ? h("p", { class: "setup-host" }, "mancar " + state.setupVersion) : null,
+        ),
+        // flat(): content may hold nested arrays, and h() flattens one level only
+        h("main", { class: "setup-body" }, ...content.flat(Infinity)),
+      ),
     ),
   );
 }
 
-// renderSignup(options): email, username and password. With email
-// verification on, the next screen asks to confirm the address.
-function renderSignup(o) {
-  const err = h("div", { class: "error", role: "alert", hidden: true });
+const stepHead = (ic, title, note) =>
+  h("div", { class: "check-email" }, h("span", { class: "check-icon", "aria-hidden": "true" }, icon(ic)), h("h1", { class: "check-title" }, title), note ? h("p", { class: "auth-note" }, note) : null);
+
+function renderSetup() {
+  setupPage(
+    0,
+    h(
+      "div",
+      { class: "check-email" },
+      h("span", { class: "mark mark-lg", "aria-hidden": "true" }),
+      h("h1", { class: "check-title" }, "Welcome to mancar"),
+      h("p", { class: "auth-note" }, "Create the admin account to get started."),
+    ),
+    h("div", { class: "form" }, button("Start", () => renderSetupAccount(), { kind: "primary", icon: "arrow" })),
+  );
+}
+
+function renderSetupAccount() {
+  const user = h("input", { name: "username", autocomplete: "username", required: true, spellcheck: "false", placeholder: "admin", pattern: "[a-z0-9][a-z0-9._\\-]{0,63}" });
+  const email = h("input", { name: "email", type: "email", autocomplete: "email", required: true, placeholder: "you@example.com" });
+  const pass = passwordInput("new-password");
+  // username and email side by side (stacked on narrow screens)
+  const form = busyForm([h("div", { class: "field-pair" }, h("label", {}, "Username", user), h("label", {}, "Email", email)), passwordLabel("Password", pass)], "Create admin", async () => {
+    const s = await api("POST", "/setup", { username: user.value.trim().toLowerCase(), email: email.value.trim(), password: pass.value });
+    renderSetupDone(s);
+  });
+  // Back and the submit button share one row at the bottom
+  const submit = form.querySelector('button[type="submit"]');
+  const row = h("div", { class: "step-actions" }, button("Back", () => renderSetup(), { icon: "back" }));
+  submit.replaceWith(row); // first take its place, then move it into the row
+  row.append(submit);
+  setupPage(1, stepHead("user", "Create the admin account", "This account manages everything on this tunnel server. Sign in later with the username or the email."), form);
+  user.focus();
+}
+
+function renderSetupDone(session) {
+  setupPage(
+    2,
+    stepHead("check", "All set", `You are signed in as ${session.username}. Next: Tokens → Create token, then connect a client.`),
+    h("div", { class: "form" }, button("Open the dashboard", () => signIn(session), { kind: "primary", icon: "arrow" })),
+  );
+}
+
+// renderSignup: email, username and password. The next screen asks to
+// confirm the address; it looks the same whether or not the address
+// already had an account.
+function renderSignup() {
   const email = h("input", { name: "email", type: "email", autocomplete: "email", required: true, placeholder: "you@example.com" });
   const user = h("input", {
     name: "username", autocomplete: "username", required: true, spellcheck: "false", placeholder: "tino",
     pattern: "[a-z0-9][a-z0-9._\\-]{0,63}", title: "Lowercase letters, digits, dot, dash or underscore",
   });
-  const pass = h("input", { name: "password", type: "password", autocomplete: "new-password", required: true, minlength: 10 });
-  const btn = h("button", { class: "btn primary", type: "submit" }, "Create account");
-  const form = h(
-    "form",
-    {
-      class: "form",
-      onsubmit: async (ev) => {
-        ev.preventDefault();
-        btn.disabled = true;
-        btn.setAttribute("aria-busy", "true");
-        err.hidden = true;
-        try {
-          const r = await api("POST", "/signup", { email: email.value.trim(), username: user.value.trim().toLowerCase(), password: pass.value });
-          if (r.verify_email) renderCheckEmail(email.value.trim());
-          else signIn(r);
-        } catch (e) {
-          err.textContent = e.message;
-          err.hidden = false;
-        } finally {
-          btn.disabled = false;
-          btn.removeAttribute("aria-busy");
-        }
-      },
-    },
-    err,
-    h("label", {}, "Email", email),
-    h("label", {}, "Username", user),
-    h("label", {}, h("span", {}, "Password ", h("span", { class: "label-hint" }, "· at least 10 characters")), pass),
-    btn,
-  );
+  const pass = passwordInput("new-password");
+  const form = busyForm([h("label", {}, "Email", email), h("label", {}, "Username", user), passwordLabel("Password", pass)], "Create account", async () => {
+    await api("POST", "/signup", { email: email.value.trim(), username: user.value.trim().toLowerCase(), password: pass.value });
+    renderCheckEmail(email.value.trim());
+  });
   authPage(
     "Create your account",
-    o.verify_email ? h("p", { class: "auth-note" }, "We'll send a link to confirm your email before you can create tokens.") : null,
+    h("p", { class: "auth-note" }, "We'll send a link to confirm your email before you can create tokens."),
     form,
-    h("p", { class: "auth-switch" }, "Already have an account? ", h("button", { class: "link-btn strong", type: "button", onclick: () => renderLogin() }, "Sign in")),
+    switchLink("Already have an account? ", "Sign in", () => renderLogin()),
   );
   email.focus();
 }
 
-function renderCheckEmail(address) {
+function renderCheckEmail(address, reset = false) {
   const resend = button("Send the link again", async () => {
     resend.disabled = true;
     try {
-      await api("POST", "/signup/resend", { email: address });
+      await api("POST", reset ? "/password/forgot" : "/signup/resend", { email: address });
       toast("Sent. Check your inbox and spam folder.");
     } catch (e) {
       toast(e.message);
@@ -293,16 +436,88 @@ function renderCheckEmail(address) {
     setTimeout(() => (resend.disabled = false), 30000); // the server rate-limits too
   }, { icon: "replay" });
   authPage(
-    "Confirm your email",
+    reset ? "Reset your password" : "Confirm your email",
     h(
       "div",
       { class: "check-email" },
       h("span", { class: "check-icon", "aria-hidden": "true" }, icon("mail")),
       h("h1", { class: "check-title" }, "Check your inbox"),
-      h("p", { class: "auth-note" }, "We sent a confirmation link to ", h("strong", {}, address), ". It works for 24 hours."),
+      h(
+        "p",
+        { class: "auth-note" },
+        reset
+          ? ["If ", h("strong", {}, address), " has an account, we sent it a link to choose a new password. It works for 1 hour."]
+          : ["We sent a confirmation link to ", h("strong", {}, address), ". It works for 24 hours."],
+      ),
     ),
     h("div", { class: "form" }, resend, button("Back to sign in", () => renderLogin(), { kind: "primary" })),
   );
+}
+
+function renderForgot() {
+  const email = h("input", { name: "email", type: "email", autocomplete: "email", required: true, placeholder: "you@example.com" });
+  const form = busyForm([h("label", {}, "Email", email)], "Send reset link", async () => {
+    await api("POST", "/password/forgot", { email: email.value.trim() });
+    renderCheckEmail(email.value.trim(), true);
+  });
+  authPage(
+    "Reset your password",
+    h("p", { class: "auth-note" }, "Enter the email of your account. We'll send a link to choose a new password."),
+    form,
+    switchLink("Remembered it? ", "Sign in", () => renderLogin()),
+  );
+  email.focus();
+}
+
+// renderReset(secret): the page a reset link opens.
+function renderReset(secret) {
+  const pass = passwordInput("new-password");
+  const again = passwordInput("new-password");
+  const form = busyForm([passwordLabel("New password", pass), h("label", {}, "New password again", again)], "Set new password", async () => {
+    if (pass.value !== again.value) throw new Error("The two passwords differ.");
+    await api("POST", "/password/reset", { token: secret, password: pass.value });
+    renderLogin();
+    toast("Password changed. Sign in with the new one.");
+  });
+  authPage("Choose a new password", form, switchLink("", "Back to sign in", () => renderLogin()));
+  pass.focus();
+}
+
+// openLink: a "#verify=…" or "#reset=…" link from an email. The secret is
+// removed from the address bar at once so it does not stay in history.
+async function openLink() {
+  // "mancar login" opens #device=CODE: ask to allow it once signed in
+  const dev = location.hash.match(/^#device=([A-Za-z0-9-]{8,9})$/);
+  if (dev) {
+    state.pendingDevice = dev[1];
+    history.replaceState(null, "", location.pathname);
+    if (state.user) deviceDialog();
+    return state.user ? "device" : false; // signed out: start() signs in first
+  }
+  const m = location.hash.match(/^#(verify|reset)=([A-Za-z0-9_-]{16,128})$/);
+  if (!m) return false;
+  history.replaceState(null, "", location.pathname);
+  if (m[1] === "reset") {
+    renderReset(m[2]);
+    return true;
+  }
+  try {
+    await api("POST", "/signup/verify", { token: m[2] });
+    authPage(
+      "Email confirmed",
+      h(
+        "div",
+        { class: "check-email" },
+        h("span", { class: "check-icon ok", "aria-hidden": "true" }, icon("check")),
+        h("h1", { class: "check-title" }, "Email confirmed"),
+        h("p", { class: "auth-note" }, "Your account is ready. Sign in to create a token and open tunnels."),
+      ),
+      h("div", { class: "form" }, button("Continue", () => start(), { kind: "primary" })),
+    );
+  } catch (e) {
+    renderLogin(e.message);
+  }
+  return true;
 }
 
 function renderShell() {
@@ -479,6 +694,7 @@ const ICONS = {
   alert: "M12 9v4M12 17h.01M10.3 3.9L2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
   chart: "M3 3v18h18M8 17v-5M13 17V8M18 17v-9",
   home: "M3 11l9-8 9 8M5 9.5V20h5v-6h4v6h5V9.5",
+  back: "M19 12H5M11 18l-6-6 6-6",
   mail: "M3 5h18v14H3zM3 6l9 7 9-7",
   shield: "M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z",
   left: "M15 18l-6-6 6-6",
@@ -707,13 +923,16 @@ function sheet(title, build, opts = {}) {
   return { dlg, close };
 }
 
-// confirmDialog({title, message, action, danger}, run): a small centered
-// alert with Cancel and an action button, used instead of the browser's
-// confirm(). The action runs inside the dialog: the button shows a spinner,
-// the dialog closes on success, and an error stays visible in the dialog.
+// confirmDialog({title, message, action, danger, password}, run): a small
+// centered alert with Cancel and an action button, used instead of the
+// browser's confirm(). With password set it also asks for the signed-in
+// account's password and passes it to run. The action runs inside the
+// dialog: the button shows a spinner, the dialog closes on success, and an
+// error stays visible in the dialog.
 function confirmDialog(o, run) {
   const dlg = h("dialog", { class: "alert", role: "alertdialog", "aria-label": o.title, tabindex: "-1" });
   const err = h("div", { class: "error", role: "alert", hidden: true });
+  const pw = o.password ? h("input", { type: "password", autocomplete: "current-password", "aria-label": "Your password", placeholder: "Your password" }) : null;
   const cancel = h("button", { class: "btn", type: "button" }, "Cancel");
   const ok = h("button", { class: "btn " + (o.danger === false ? "primary" : "danger"), type: "button" }, o.action || "OK");
   const busy = (on) => {
@@ -734,7 +953,7 @@ function confirmDialog(o, run) {
     busy(true);
     err.hidden = true;
     try {
-      await run();
+      await run(pw ? pw.value : undefined);
       done();
     } catch (e) {
       err.textContent = e.message;
@@ -742,20 +961,22 @@ function confirmDialog(o, run) {
       busy(false);
     }
   });
+  if (pw) pw.addEventListener("keydown", (e) => e.key === "Enter" && ok.click());
   dlg.append(
-    h("div", { class: "alert-body" }, h("h2", { class: "alert-title" }, o.title), o.message ? h("p", { class: "alert-message" }, o.message) : null, err),
+    h("div", { class: "alert-body" }, h("h2", { class: "alert-title" }, o.title), o.message ? h("p", { class: "alert-message" }, o.message) : null, pw, err),
     h("div", { class: "alert-actions" }, cancel, ok),
   );
   document.body.append(dlg);
   dlg.showModal();
-  dlg.focus();
+  if (pw) pw.focus();
+  else dlg.focus();
 }
 
 // confirmThen(opts, fn): a click handler that asks first, runs fn, then
 // reloads the current view.
 const confirmThen = (o, fn) => () =>
-  confirmDialog(o, async () => {
-    await fn();
+  confirmDialog(o, async (value) => {
+    await fn(value);
     refresh();
   });
 
@@ -810,7 +1031,7 @@ function codeBlockCopy(value, label) {
 // The three client commands, one block each: pasting them together would feed
 // the third line into the token prompt of the second.
 const clientSetup = () => [
-  codeBlock(`mancar config set server ${location.origin}`, { label: "Point the client at this gateway" }),
+  codeBlock(`mancar config set server ${location.origin}`, { label: "Point the client at this server" }),
   codeBlock("mancar config set token -", { label: "Save the token: paste it, press Enter, then Ctrl+D" }),
   codeBlock("mancar http 3000", { label: "Open a tunnel to localhost:3000" }),
 ];
@@ -831,8 +1052,9 @@ const onlineBadge = (label = "online") => h("span", { class: "badge ok" }, h("sp
 function clientSheet() {
   sheet("Connect a client", (close) => [
     group("1 · Install", codeBlock("https://github.com/tinoimammp/mancar/releases/latest", { label: "Download mancar from the latest release" })),
-    group("2 · Get a token", actions(button("Create a token", () => (close(), newTokenDialog()), { icon: "tokens" })), "The token is shown once, right after it is created."),
-    group("3 · Connect and open a tunnel", clientSetup(), "Run them one at a time, in this order."),
+    group("2 · Sign in", codeBlock(`mancar login ${location.origin}`, { label: "Opens this dashboard to allow your computer; the token is saved for you" })),
+    group("3 · Open a tunnel", codeBlock("mancar http 3000", { label: "localhost:3000 gets a public address" })),
+    group("No browser on that machine?", actions(button("Create a token by hand", () => (close(), newTokenDialog()), { icon: "tokens" })), "Then use mancar config set server and mancar config set token -."),
   ]);
 }
 
@@ -1069,11 +1291,11 @@ function renderTokens(d) {
   const activeCount = d.tokens.filter((t) => !t.revoked_at).length;
   // a user has a token limit and must confirm their email first
   const own = state.role === "user";
-  const blocked = own && (!d.email_verified ? "Confirm your email to create tokens." : activeCount >= d.limit ? `You have ${d.limit} active tokens, the most allowed. Revoke one first.` : "");
+  const blocked = own && (!d.email_verified ? "Confirm your email to create tokens." : d.limit != null && activeCount >= d.limit ? `You have ${d.limit} active tokens, the most allowed. Revoke one first.` : "");
   return [
     head(
       "Tokens",
-      own ? `${activeCount} of ${d.limit} active tokens used` : `${activeCount} active of ${d.tokens.length} tokens`,
+      own ? (d.limit == null ? plural(activeCount, "active token") : `${activeCount} of ${d.limit} active tokens used`) : `${activeCount} active of ${d.tokens.length} tokens`,
       button("Create token", () => newTokenDialog(), { kind: "primary", icon: "plus", disabled: !!blocked, hint: blocked || null }),
     ),
     blocked ? h("div", { class: "notice" }, blocked) : null,
@@ -1192,54 +1414,259 @@ function tokenCreated(r) {
 
 // ---- users ---------------------------------------------------------------------
 
+// Accounts: role, status and what they own. Filters: role or status.
+const USER_FILTERS = {
+  all: ["All", () => true],
+  admin: ["Admins", (u) => u.role === "admin"],
+  user: ["Users", (u) => u.role === "user"],
+  unverified: ["Unconfirmed", (u) => u.status === "unverified"],
+  disabled: ["Disabled", (u) => u.status === "disabled"],
+};
+
+function userStatus(u) {
+  if (u.status === "disabled") return h("span", { class: "badge danger" }, "disabled");
+  if (u.status === "unverified") return h("span", { class: "badge warn" }, "unconfirmed");
+  if (u.connected_agents) return onlineBadge(`${u.connected_agents} online`);
+  return h("span", { class: "badge" }, "offline");
+}
+
 function renderUsers(d) {
+  state.userShow = state.userShow || "all";
+  const inScope = d.users.filter((u) => matches("users", u.username, u.email));
+  const users = inScope.filter(USER_FILTERS[state.userShow][1]);
+  const chip = (key) =>
+    h(
+      "button",
+      {
+        type: "button", class: "chip", "aria-pressed": String(state.userShow === key),
+        onclick: () => {
+          state.userShow = key;
+          state.pages.users = 1;
+          draw();
+        },
+      },
+      USER_FILTERS[key][0],
+      h("span", { class: "chip-count" }, inScope.filter(USER_FILTERS[key][1]).length),
+    );
   const online = d.users.filter((u) => u.connected_agents).length;
-  const users = d.users.filter((u) => matches("users", u.username));
   return [
-    head("Users", `${online} online of ${plural(d.users.length, "user")}`),
-    group(null, h("div", { class: "card toolbar" }, searchBox("users", "Search user"))),
-    group(
+    head(
       "Users",
+      `${online} online of ${plural(d.users.length, "account")} · ${plural(d.users.filter((u) => u.role === "admin").length, "admin")}`,
+      button("Add user", () => createUserDialog(), { kind: "primary", icon: "plus" }),
+    ),
+    group(
+      null,
+      h("div", { class: "card toolbar" }, searchBox("users", "Search username or email"), h("div", { class: "chips", role: "group", "aria-label": "Show" }, Object.keys(USER_FILTERS).map(chip))),
+    ),
+    group(
+      USER_FILTERS[state.userShow][0],
       paged(
         "users",
         users,
         (u) =>
           cell({
             avatar: initials(u.username),
-            title: u.username,
-            subtitle: `${plural(u.active_tokens, "token")} · ${plural(u.domains, "domain")} · ${fmtNum(u.usage.day.requests)} requests today`,
-            trailing: u.connected_agents ? onlineBadge(`${u.connected_agents} online`) : h("span", { class: "badge" }, "offline"),
-            onclick: () => userSheet(u),
+            title: u.role === "admin" ? [u.username, h("span", { class: "role-tag" }, "admin")] : u.username,
+            subtitle: [u.email || "no email", plural(u.active_tokens, "token"), `${fmtNum(u.usage.day.requests)} requests today`].join(" · "),
+            trailing: userStatus(u),
+            onclick: () => userSheet(u, d),
           }),
-        state.search.users ? `No user matches “${state.search.users}”.` : "No users yet. Creating a token creates its user.",
+        state.search.users ? `No account matches “${state.search.users}”.` : "No account in this filter.",
       ),
-      "Creating a token for a new name creates that user.",
+      "Admins manage the whole server; users see only their own tunnels, tokens and requests.",
       users.length === d.users.length ? total(d.users.length) : `${users.length} of ${d.users.length}`,
     ),
   ];
 }
 
-function userSheet(u) {
-  sheet(u.username, (close) => [
-    group("Traffic", stats(stat("24 hours", fmtNum(u.usage.day.requests)), stat("7 days", fmtNum(u.usage.week.requests)), stat("All time", fmtNum(u.usage.total.requests)))),
-    group(null, [
-      cell({ title: "Connected agents", value: fmtNum(u.connected_agents) }),
-      cell({ title: "Active tokens", value: fmtNum(u.active_tokens) }),
-      cell({ title: "Reserved domains", value: fmtNum(u.domains) }),
-      cell({ title: "Created", value: ago(u.created_at), hint: fmtDate(u.created_at) }),
-    ]),
-    group(null, actions(
-      button("New token", () => (close(), newTokenDialog(u.username)), { kind: "primary", icon: "plus" }),
-      button("Delete user", confirmThen({
-        title: `Delete user ${u.username}?`,
-        message: "Their tokens, reserved names, captured requests and statistics are deleted and their agents disconnected. This cannot be undone.",
-        action: "Delete user",
-      }, async () => {
-        await api("DELETE", `/users/${encodeURIComponent(u.id)}`);
-        close();
-      }), { kind: "danger", icon: "trash" }),
-    ), "Deleting removes their tokens, reserved hostnames, captured requests and statistics, and disconnects their agents."),
+const limitLabel = (n) => (n == null ? "No limit" : fmtNum(n));
+
+// userSheet(u, d): one account, with every admin action. Actions that
+// change it reload the list and close the sheet.
+function userSheet(u, d) {
+  const self = u.username === state.user;
+  const patch = (body) => api("PATCH", `/users/${encodeURIComponent(u.id)}`, body);
+  sheet(u.username, (close) => {
+    const after = (msg) => () => {
+      close();
+      if (msg) toast(msg);
+    };
+    const run = (o, fn, msg) => confirmThen(o, async (v) => {
+      await fn(v);
+      after(msg)();
+    });
+    return [
+      group(null, h(
+        "div",
+        { class: "card profile" },
+        avatar(initials(u.username)),
+        h("div", { class: "cell-text" }, h("span", { class: "profile-title" }, u.username), h("span", { class: "cell-subtitle" }, u.email || "No email address")),
+        h("span", { class: "badge" + (u.role === "admin" ? " ok" : "") }, u.role),
+      )),
+      group("Traffic", stats(stat("24 hours", fmtNum(u.usage.day.requests)), stat("7 days", fmtNum(u.usage.week.requests)), stat("All time", fmtNum(u.usage.total.requests)))),
+      group("Account", [
+        cell({ avatar: "eye", title: "Status", trailing: userStatus(u) }),
+        cell({ avatar: "mail", title: "Email", value: u.email ? (u.email_verified ? "confirmed" : "not confirmed") : "none" }),
+        cell({ avatar: "clock", title: "Last sign in", value: u.last_login_at ? ago(u.last_login_at) : "never", hint: fmtDate(u.last_login_at) }),
+        cell({ avatar: "user", title: "Joined", value: ago(u.created_at) + (u.signed_up ? " · signed up" : ""), hint: fmtDate(u.created_at) }),
+        u.has_password ? null : cell({ avatar: "ban", title: "Cannot sign in", value: "no password yet", tone: "disabled" }),
+      ]),
+      group("Owns", [
+        cell({ avatar: "agents", title: "Connected agents", value: fmtNum(u.connected_agents) }),
+        cell({ avatar: "tokens", title: "Active tokens", value: `${fmtNum(u.active_tokens)} / ${limitLabel(u.max_tokens)}` }),
+        cell({ avatar: "tag", title: "Custom subdomains", value: `${fmtNum(u.custom_domains)} / ${limitLabel(u.max_custom_domains)}` }),
+      ], u.role === "admin" ? "Limits do not apply to admins." : null),
+      group("Manage", actions(
+        button("New token", () => (close(), newTokenDialog(u.username)), { icon: "plus" }),
+        button("Limits", () => (close(), limitsDialog(u)), { icon: "tag" }),
+        button("Reset password", () => (close(), resetPasswordDialog(u, d.email_enabled)), { icon: "shield" }),
+        u.email && !u.email_verified
+          ? button("Mark email confirmed", run({ title: `Confirm ${u.email}?`, message: "Only do this if you know the address belongs to them.", action: "Confirm", danger: false },
+              () => patch({ email_verified: true }), "Email confirmed"), { icon: "check" })
+          : null,
+        u.email && !u.email_verified && d.email_enabled
+          ? button("Send confirmation again", run({ title: `Email ${u.email} a new link?`, action: "Send", danger: false },
+              () => api("POST", `/users/${encodeURIComponent(u.id)}/resend-verification`), "Link sent"), { icon: "mail" })
+          : null,
+      )),
+      self
+        ? group(null, null, "This is your account: change your own role or status from another admin's account.")
+        : group("Access", actions(
+            u.role === "admin"
+              ? button("Make user", run({ title: `Make ${u.username} a user?`, message: "They keep their tokens and tunnels but lose access to the whole server at once.", action: "Make user" },
+                  () => patch({ role: "user" }), `${u.username} is now a user`), { icon: "user" })
+              : button("Make admin", run({ title: `Make ${u.username} an admin?`, message: "They will see and manage everything on this server. Enter your password to confirm.", action: "Make admin", danger: false, password: true },
+                  (pw) => patch({ role: "admin", confirm_password: pw }), `${u.username} is now an admin`), { kind: "primary", icon: "shield" }),
+            u.status === "disabled"
+              ? button("Enable", run({ title: `Enable ${u.username}?`, message: "They can sign in again and their tokens work again.", action: "Enable", danger: false },
+                  () => patch({ disabled: false }), "Enabled"), { icon: "check" })
+              : button("Disable", run({ title: `Disable ${u.username}?`, message: "They are signed out, their tokens are refused and their agents disconnected. Nothing is deleted; enable them to undo.", action: "Disable" },
+                  () => patch({ disabled: true }), "Disabled"), { kind: "danger", icon: "ban" }),
+            button("Revoke all tokens", run({ title: `Revoke every token of ${u.username}?`, message: "Their agents disconnect and cannot reconnect with these tokens. This cannot be undone.", action: "Revoke all" },
+              async () => {
+                const r = await api("POST", `/users/${encodeURIComponent(u.id)}/revoke-tokens`);
+                toast(`${plural(r.revoked, "token")} revoked`);
+              }), { kind: "danger", icon: "tokens" }),
+            button("Delete account", run({
+              title: `Delete ${u.username}?`,
+              message: "Their tokens, reserved names, captured requests and statistics are deleted and their agents disconnected. This cannot be undone.",
+              action: "Delete account",
+            }, () => api("DELETE", `/users/${encodeURIComponent(u.id)}`), "Account deleted"), { kind: "danger", icon: "trash" }),
+          ), "The server always keeps at least one active admin."),
+    ];
+  });
+}
+
+// formSheet(title, fields, label, submit): a sheet with a stacked form.
+function formSheet(title, note, fields, label, submit) {
+  const { dlg, close } = sheet(title, (close) => [
+    group(null, (() => {
+      const f = busyForm(fields, label, () => submit(close));
+      f.classList.add("card");
+      return f;
+    })(), note),
   ]);
+  const first = dlg.querySelector("input, select");
+  if (first) first.focus();
+}
+
+function createUserDialog() {
+  const user = h("input", { name: "username", required: true, autocomplete: "off", spellcheck: "false", pattern: "[a-z0-9][a-z0-9._\\-]{0,63}", placeholder: "rina" });
+  const email = h("input", { name: "email", type: "email", autocomplete: "off", placeholder: "rina@example.com (optional)" });
+  const pass = passwordInput("new-password");
+  const role = h("select", { name: "role" }, h("option", { value: "user" }, "User: their own tunnels only"), h("option", { value: "admin" }, "Admin: the whole server"));
+  formSheet(
+    "Add user",
+    "The email is treated as confirmed. Share the password with them safely; they can change it under Account.",
+    [h("label", {}, "Username", user), h("label", {}, "Email", email), passwordLabel("Password", pass), h("label", {}, "Role", role)],
+    "Add user",
+    async (close) => {
+      await api("POST", "/users", { username: user.value.trim().toLowerCase(), email: email.value.trim(), password: pass.value, role: role.value });
+      close();
+      toast(`${user.value.trim().toLowerCase()} added`);
+      refresh();
+    },
+  );
+}
+
+function limitsDialog(u) {
+  const field = (name, value) => h("input", { name, type: "number", min: 0, max: 10000, step: 1, inputmode: "numeric", value: value == null ? "" : String(value), placeholder: "No limit" });
+  const tok = field("max_tokens", u.max_tokens);
+  const dom = field("max_custom_domains", u.max_custom_domains);
+  const val = (i) => (i.value.trim() === "" ? null : Number(i.value));
+  formSheet(
+    `Limits for ${u.username}`,
+    "Leave a field empty for no limit. Random subdomains are never limited; admins ignore these limits.",
+    [h("label", {}, "Active tokens", tok), h("label", {}, "Custom subdomains", dom)],
+    "Save limits",
+    async (close) => {
+      await api("PATCH", `/users/${encodeURIComponent(u.id)}`, { max_tokens: val(tok), max_custom_domains: val(dom) });
+      close();
+      toast("Limits saved");
+      refresh();
+    },
+  );
+}
+
+function resetPasswordDialog(u, emailEnabled) {
+  const viaEmail = emailEnabled && u.email;
+  sheet(`Reset password of ${u.username}`, (close) => [
+    viaEmail
+      ? group("By email", actions(button("Email a reset link", confirmThen({ title: `Email a reset link to ${u.email}?`, message: "They choose a new password themselves. The link works for 1 hour.", action: "Send", danger: false },
+          async () => {
+            await api("POST", `/users/${encodeURIComponent(u.id)}/reset-password`, { mode: "email" });
+            close();
+            toast("Reset link sent");
+          }), { kind: "primary", icon: "mail" })), "Recommended: you never see their password.")
+      : null,
+    group("Temporary password", actions(button("Set a temporary password", confirmThen({ title: `Replace the password of ${u.username}?`, message: "Their sessions end at once. You will see the new password once.", action: "Replace" },
+      async () => {
+        const r = await api("POST", `/users/${encodeURIComponent(u.id)}/reset-password`, { mode: "temporary" });
+        close();
+        sheet("Temporary password", () => [
+          h("div", { class: "notice" }, "Copy it now. It is not stored and will never be shown again."),
+          group(`New password for ${u.username}`, codeBlock(r.password), "Ask them to change it under Account after signing in."),
+        ]);
+      }), { icon: "shield" })), viaEmail ? null : "This account has no email, or the server cannot send email (SMTP_URL)."),
+  ]);
+}
+
+// ---- activity (audit log) -------------------------------------------------
+
+const AUDIT_LABELS = {
+  "user.create": "added account", "user.role": "changed role", "user.disable": "disabled", "user.enable": "enabled",
+  "user.delete": "deleted account", "user.email": "changed email", "user.verify": "confirmed email", "user.limits": "changed limits",
+  "user.reset_password": "reset password", "user.revoke_tokens": "revoked all tokens", "user.resend_verification": "sent confirmation",
+  "token.create": "created token", "token.revoke": "revoked token", "agent.disconnect": "disconnected agent",
+  "domain.release": "released hostname", "request.replay": "replayed request", "requests.clear": "cleared requests",
+  "account.password": "changed own password", "account.delete": "deleted own account",
+};
+
+function renderActivity(d) {
+  const hit = (e) => matches("activity", e.actor, e.action, e.target, e.detail);
+  const list = d.entries.filter(hit);
+  return [
+    head("Activity", "What was done on this server, newest first. Kept for a year."),
+    group(null, h("div", { class: "card toolbar" }, searchBox("activity", "Search who, what or target"))),
+    group(
+      "Recent",
+      paged(
+        "activity",
+        list,
+        (e) =>
+          cell({
+            avatar: initials(e.actor),
+            title: [h("strong", {}, e.actor), " " + (AUDIT_LABELS[e.action] || e.action), ...(e.target ? [" · ", h("span", { class: "mono" }, e.target)] : [])],
+            subtitle: [new Date(e.at).toLocaleString(), e.detail].filter(Boolean).join(" · "),
+          }),
+        state.search.activity ? `Nothing matches “${state.search.activity}”.` : "Nothing yet.",
+        25,
+      ),
+      null,
+      total(list.length),
+    ),
+  ];
 }
 
 // ---- domains -------------------------------------------------------------------
@@ -1303,7 +1730,7 @@ async function loadRequests() {
 
 function renderRequests(d) {
   if (d.disabled) {
-    return [head("Requests"), group(null, empty(d.disabled), "Set INSPECT=on and ENCRYPTION_KEY in .env, then restart the gateway.")];
+    return [head("Requests"), group(null, empty(d.disabled), "Set INSPECT=on and ENCRYPTION_KEY in .env, then restart mancard.")];
   }
   const filter = h("input", {
     type: "search",
@@ -1469,7 +1896,7 @@ function verifyBanner(email) {
   const resend = button("Send again", async () => {
     resend.disabled = true;
     try {
-      await api("POST", "/account/verify/resend");
+      await api("POST", own("/account/verify/resend"));
       toast("Sent. Check your inbox and spam folder.");
     } catch (e) {
       toast(e.message);
@@ -1485,7 +1912,8 @@ function verifyBanner(email) {
   );
 }
 
-const limitText = (used, max) => `${fmtNum(used)} / ${fmtNum(max)}`;
+// "2 / 3", or just "2" when there is no limit (null)
+const limitText = (used, max) => (max == null ? fmtNum(used) : `${fmtNum(used)} / ${fmtNum(max)}`);
 
 function renderMyOverview(o) {
   const live = o.tunnels.slice().sort((x, y) => (y.active_connections || 0) - (x.active_connections || 0));
@@ -1527,7 +1955,7 @@ function renderMyTunnels(o) {
       onclick: () => mySubdomainSheet(x),
     });
   return [
-    head("Tunnels", `${o.tunnels.length} of ${o.limits.tunnels} online · ${custom} of ${o.limits.custom_domains} custom subdomains`),
+    head("Tunnels", `${o.tunnels.length} of ${o.limits.tunnels} online · ${o.limits.custom_domains == null ? plural(custom, "custom subdomain") : `${custom} of ${o.limits.custom_domains} custom subdomains`}`),
     group(
       "Online",
       o.tunnels.length ? o.tunnels.map((t) => tunnelCell(t, "since " + ago(t.created_at).replace(" ago", ""))) : empty("No tunnel is online. Start one with: mancar http 3000"),
@@ -1573,7 +2001,7 @@ function mySubdomainSheet(x) {
 function renderAccount(a) {
   const err = h("div", { class: "error", role: "alert", hidden: true });
   const current = h("input", { name: "current", type: "password", autocomplete: "current-password", required: true });
-  const next = h("input", { name: "new", type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+  const next = passwordInput("new-password");
   const save = h("button", { class: "btn primary", type: "submit" }, "Change password");
   const pwForm = h(
     "form",
@@ -1584,7 +2012,7 @@ function renderAccount(a) {
         save.disabled = true;
         err.hidden = true;
         try {
-          await api("POST", "/account/password", { current: current.value, new: next.value });
+          await api("POST", own("/account/password"), { current: current.value, new: next.value });
           current.value = next.value = "";
           toast("Password changed. Other sessions are signed out.");
         } catch (e) {
@@ -1597,7 +2025,7 @@ function renderAccount(a) {
     },
     err,
     h("label", {}, "Current password", current),
-    h("label", {}, h("span", {}, "New password ", h("span", { class: "label-hint" }, "· at least 10 characters")), next),
+    passwordLabel("New password", next),
     save,
   );
   return [
@@ -1612,16 +2040,16 @@ function renderAccount(a) {
     a.email_verified ? null : verifyBanner(a.email),
     group("Your limits", [
       cell({ avatar: "link", title: "Tunnels at once", value: fmtNum(a.limits.tunnels) }),
-      cell({ avatar: "tokens", title: "Active tokens", value: fmtNum(a.limits.tokens) }),
-      cell({ avatar: "tag", title: "Custom subdomains", value: fmtNum(a.limits.custom_domains) }),
-    ], "Set by the gateway admin."),
+      cell({ avatar: "tokens", title: "Active tokens", value: limitLabel(a.limits.tokens) }),
+      cell({ avatar: "tag", title: "Custom subdomains", value: limitLabel(a.limits.custom_domains) }),
+    ], a.role === "admin" ? "Admins have no token or subdomain limits." : "Set by the server admin."),
     group("Password", pwForm, "Changing it signs you out everywhere else. Your tokens keep working."),
     group("Delete account", actions(button("Delete my account", confirmThen({
       title: "Delete your account?",
       message: "Your tokens, subdomains, captured requests and statistics are deleted and your agents disconnected. This cannot be undone.",
       action: "Delete account",
     }, async () => {
-      await api("DELETE", "/account");
+      await api("DELETE", own("/account"));
       state.user = null;
       stopRefresh();
       renderLogin();
@@ -1631,7 +2059,13 @@ function renderAccount(a) {
 
 // ---- start -----------------------------------------------------------------
 
-window.addEventListener("hashchange", () => {
+window.addEventListener("hashchange", async () => {
+  // an email link opened in a tab that already shows the dashboard
+  const link = await openLink();
+  if (link) {
+    if (link !== "device") stopRefresh(); // verify/reset replace the page; a device sheet does not
+    return;
+  }
   const v = location.hash.slice(1);
   if (state.user && v in views() && v !== state.view) go(v);
 });
@@ -1640,10 +2074,12 @@ document.addEventListener("visibilitychange", () => {
   if (state.user && document.visibilityState === "visible" && !views()[state.view].static) refresh();
 });
 
-(async function start() {
+async function start() {
   try {
     signIn(await api("GET", "/session"));
   } catch (e) {
     renderLogin(e.status === 401 ? undefined : e.message);
   }
-})();
+}
+
+openLink().then((handled) => handled || start());

@@ -9,7 +9,8 @@
   static/app.js with fake data, no gateway and no login. Never embedded in the
   binary (only static/ is). Run: make dashboard-preview
   Theme: ?theme=light | ?theme=dark | (none) follows the system.
-  Role: ?as=admin (default) | user | unverified | guest (sign in and sign up).
+  Role: ?as=admin (default) | user | unverified | guest (sign in and sign up)
+  | setup (a fresh gateway: create the first admin).
   ?click=N opens the Nth clickable row, e.g. a detail sheet.
 -->
 <script src="mock.js"></script>
@@ -36,6 +37,7 @@
   <a href="?as=user">user</a>
   <a href="?as=unverified">unverified</a>
   <a href="?as=guest">sign in / up</a>
+  <a href="?as=setup">first run</a>
   · theme:
   <a href="?theme=light">light</a>
   <a href="?theme=dark">dark</a>
