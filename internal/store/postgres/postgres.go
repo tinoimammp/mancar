@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -26,7 +27,7 @@ type Store struct{ DB *sql.DB }
 // Open connects with a bounded pool and waits (up to wait) for the database
 // to accept connections.
 func Open(ctx context.Context, databaseURL string, wait time.Duration) (*Store, error) {
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := sql.Open("postgres", withBinaryParameters(databaseURL))
 	if err != nil {
 		return nil, fmt.Errorf("postgres: %w", err)
 	}
@@ -49,6 +50,30 @@ func Open(ctx context.Context, databaseURL string, wait time.Duration) (*Store, 
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+// withBinaryParameters turns on lib/pq's binary_parameters unless the URL
+// sets it. lib/pq then sends a query and its parameters in one round trip
+// (parse, bind, execute, sync) instead of preparing it first in a separate
+// one. That is required behind PgBouncer in transaction pooling mode, which
+// may hand the two round trips to different server connections ("bind
+// message supplies 2 parameters, but prepared statement requires 4"). It is
+// also one round trip less without PgBouncer.
+func withBinaryParameters(dsn string) string {
+	if strings.Contains(dsn, "binary_parameters") {
+		return dsn
+	}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return dsn
+		}
+		q := u.Query()
+		q.Set("binary_parameters", "yes")
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	return strings.TrimSpace(dsn) + " binary_parameters=yes" // key=value form
 }
 
 // Close releases the pool.
