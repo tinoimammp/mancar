@@ -39,8 +39,8 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://mancar:testpw@127.0.0.1:5432/mancar_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: go.mod
       - name: gofmt
@@ -49,6 +49,13 @@ jobs:
         run: go vet ./...
       - name: tests (race detector, real PostgreSQL)
         run: go test -race -count=1 -timeout 15m ./...
+      - name: PostgreSQL tests through PgBouncer (transaction pooling, as in docker-compose.yml)
+        run: |
+          docker run -d --name pgbouncer --network host -v "$PWD/test/pgbouncer:/cfg:ro" \
+            --entrypoint /usr/bin/pgbouncer edoburu/pgbouncer:v1.26.1-p0 /cfg/pgbouncer.ini
+          for i in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 6432 && break; sleep 1; done
+          TEST_DATABASE_URL='postgres://mancar:testpw@127.0.0.1:6432/mancar_test?sslmode=disable' \
+            go test -count=1 -timeout 10m ./internal/store/...
       - name: every release target compiles
         run: |
           for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
@@ -58,15 +65,15 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: shellcheck -x scripts/*.sh
 
   edge-e2e:
     # Real Caddy in front of the real gateway, with the production Caddyfile.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: go.mod
       - name: install Caddy
@@ -81,8 +88,8 @@ jobs:
   vulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: go.mod
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -92,7 +99,7 @@ jobs:
     # Proves both images build and the compose file is valid.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: build gateway image
         run: docker build --build-arg VERSION=ci -t mancar:ci .
       - name: build edge image (Caddy + Cloudflare DNS plugin)
