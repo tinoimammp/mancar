@@ -39,13 +39,11 @@ func RestrictedPage(w http.ResponseWriter, host, signIn string) {
 }
 
 // myAccess sends the signed-in person on from the sign in page (#ref=
-// HOST/PATH) to a tunnel. The owner of a live private tunnel, and the
-// accounts it was shared with (--allow), get its URL with a one-time ticket; anyone else (and any host that is offline) gets
-// the plain URL, where the gateway shows the Restricted page again;
-// "allowed" tells the dashboard which of the two it is. Someone else's
-// tunnel and an offline one answer alike, so this does not reveal who owns
-// what. Hosts outside
-// BASE_DOMAIN are refused: this is never an open redirect.
+// HOST/PATH) to a tunnel. The owner of a live tunnel, and the accounts a
+// private one was shared with (--allow), get its URL (with a one-time
+// ticket when private). Anyone else gets the plain URL of a live private
+// tunnel, where the gateway shows the Restricted page again, or no URL at
+// all. Hosts outside BASE_DOMAIN are refused.
 func (d *Dashboard) myAccess(w http.ResponseWriter, r *http.Request) {
 	a := accountFrom(r)
 	var in struct {
@@ -72,16 +70,27 @@ func (d *Dashboard) myAccess(w http.ResponseWriter, r *http.Request) {
 	if d.opts.PublicPort != "" {
 		plain += ":" + d.opts.PublicPort
 	}
-	out := map[string]any{"url": plain + path, "allowed": false}
+	// The answer only ever points at a tunnel this account may open, or at
+	// a live private tunnel (where the gateway shows its own Restricted
+	// page). Never at someone else's public tunnel: the dashboard is not a
+	// redirector to arbitrary apps under BASE_DOMAIN (phishing).
+	out := map[string]any{"url": "", "allowed": false, "owner": false}
 	for _, s := range d.opts.Hub.Sessions() {
 		for _, t := range s.Tunnels {
-			mayOpen := s.UserID == a.ID || slices.Contains(t.AllowIDs, a.ID)
+			if t.Hostname != host {
+				continue
+			}
+			owner := s.UserID == a.ID
+			// shared accounts must have confirmed their email (the owner
+			// may have shared by email address)
+			mayOpen := owner || (a.Verified() && slices.Contains(t.AllowIDs, a.ID))
 			switch {
-			case t.Hostname != host || !mayOpen:
-			case t.Private && d.opts.Access != nil:
-				out["url"], out["allowed"] = d.opts.Access.TicketURL(t.PublicURL, host, a.ID, path), true
-			case !t.Private:
-				out["url"], out["allowed"] = strings.TrimSuffix(t.PublicURL, "/")+path, true
+			case mayOpen && t.Private && d.opts.Access != nil:
+				out["url"], out["allowed"], out["owner"] = d.opts.Access.TicketURL(t.PublicURL, host, a.ID, path), true, owner
+			case mayOpen && !t.Private:
+				out["url"], out["allowed"], out["owner"] = strings.TrimSuffix(t.PublicURL, "/")+path, true, owner
+			case t.Private:
+				out["url"] = plain + path // the Restricted page again
 			}
 		}
 	}

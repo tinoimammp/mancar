@@ -82,6 +82,20 @@ func (l *FailureLimiter) Fail(key string) {
 	w.count++
 }
 
+// Forgive takes back one failure recorded for key. Callers record a
+// failure before slow work (password hashing) and forgive it on success, so
+// a burst of simultaneous attempts cannot all slip past Blocked.
+func (l *FailureLimiter) Forgive(key string) {
+	if l == nil || l.max <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if w, ok := l.m[key]; ok && w.count > 0 {
+		w.count--
+	}
+}
+
 // sweepLocked drops expired windows; if the table is still full it evicts
 // arbitrary entries so memory stays bounded even under a spray of keys.
 func (l *FailureLimiter) sweepLocked(now time.Time) {

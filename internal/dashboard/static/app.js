@@ -181,8 +181,13 @@ async function openAccess() {
   const host = target.split(/[/?]/)[0];
   try {
     const r = await api("POST", own("/access"), { target });
-    if (r.allowed) accessGranted(host, r.url);
-    else if (fresh) location.replace(r.url); // just logged in, still no access: the Restricted page again
+    if (r.allowed) accessGranted(host, r.url, r.owner);
+    else if (!r.url) {
+      // nothing private to open there (offline, or not a private tunnel)
+      history.replaceState(null, "", location.pathname);
+      signIn({ username: state.user, role: state.role });
+      toast(`There is no private tunnel to open at ${host}.`);
+    } else if (fresh) location.replace(r.url); // just logged in, still no access: the Restricted page again
     else {
       // came signed in with an account that has no access: let them switch
       state.pendingAccess = target;
@@ -198,7 +203,22 @@ async function openAccess() {
 
 // accessGranted: the owner is let in; the tunnel opens after a short
 // countdown, or at once with the button. (The ticket in url lasts a minute.)
-function accessGranted(host, url) {
+function accessGranted(host, url, owner) {
+  let timer = 0;
+  const open = () => {
+    clearInterval(timer);
+    location.replace(url);
+  };
+  if (!owner) {
+    // someone else's tunnel, shared with this account: open it only on a
+    // click, so a link cannot send a signed-in person to it unawares
+    authPage(
+      "Private tunnel",
+      h("div", { class: "check-email" }, h("span", { class: "check-icon ok", "aria-hidden": "true" }, icon("check")), h("h1", { class: "check-title" }, "Access granted"), h("p", { class: "auth-note" }, h("strong", {}, host), " was shared with you.")),
+      h("div", { class: "form" }, button(`Open ${host}`, open, { kind: "primary" })),
+    );
+    return;
+  }
   let left = 5;
   const note = h("p", { class: "auth-note" });
   const tick = () => {
@@ -208,14 +228,11 @@ function accessGranted(host, url) {
       location.replace(url);
     }
   };
-  const timer = setInterval(tick, 1000);
+  timer = setInterval(tick, 1000);
   authPage(
     "Private tunnel",
     h("div", { class: "check-email" }, h("span", { class: "check-icon ok", "aria-hidden": "true" }, icon("check")), h("h1", { class: "check-title" }, "Access granted"), note),
-    h("div", { class: "form" }, button("Open now", () => {
-      clearInterval(timer);
-      location.replace(url);
-    }, { kind: "primary" })),
+    h("div", { class: "form" }, button("Open now", open, { kind: "primary" })),
   );
   tick();
 }
@@ -1648,13 +1665,22 @@ function createUserDialog() {
   const email = h("input", { name: "email", type: "email", autocomplete: "off", placeholder: "rina@example.com (optional)" });
   const pass = passwordInput("new-password");
   const role = h("select", { name: "role" }, h("option", { value: "user" }, "User: their own tunnels only"), h("option", { value: "admin" }, "Admin: the whole server"));
+  // creating an admin needs your own password (the server checks it)
+  const mine = h("input", { name: "confirm_password", type: "password", autocomplete: "current-password" });
+  const mineLabel = h("label", { hidden: true }, "Your password (to create an admin)", mine);
+  role.addEventListener("change", () => {
+    mineLabel.hidden = role.value !== "admin";
+    mine.required = role.value === "admin";
+  });
   formSheet(
     "Add user",
     "The email is treated as confirmed. Share the password with them safely; they can change it under Account.",
-    [h("label", {}, "Username", user), h("label", {}, "Email", email), passwordLabel("Password", pass), h("label", {}, "Role", role)],
+    [h("label", {}, "Username", user), h("label", {}, "Email", email), passwordLabel("Password", pass), h("label", {}, "Role", role), mineLabel],
     "Add user",
     async (close) => {
-      await api("POST", "/users", { username: user.value.trim().toLowerCase(), email: email.value.trim(), password: pass.value, role: role.value });
+      const body = { username: user.value.trim().toLowerCase(), email: email.value.trim(), password: pass.value, role: role.value };
+      if (role.value === "admin") body.confirm_password = mine.value;
+      await api("POST", "/users", body);
       close();
       toast(`${user.value.trim().toLowerCase()} added`);
       refresh();
@@ -1683,6 +1709,7 @@ function limitsDialog(u) {
 
 function resetPasswordDialog(u, emailEnabled) {
   const viaEmail = emailEnabled && u.email;
+  const otherAdmin = u.role === "admin" && u.username !== state.user; // needs your password
   sheet(`Reset password of ${u.username}`, (close) => [
     viaEmail
       ? group("By email", actions(button("Email a reset link", confirmThen({ title: `Email a reset link to ${u.email}?`, message: "They choose a new password themselves. The link works for 1 hour.", action: "Send", danger: false },
@@ -1692,9 +1719,16 @@ function resetPasswordDialog(u, emailEnabled) {
             toast("Reset link sent");
           }), { kind: "primary", icon: "mail" })), "Recommended: you never see their password.")
       : null,
-    group("Temporary password", actions(button("Set a temporary password", confirmThen({ title: `Replace the password of ${u.username}?`, message: "Their sessions end at once. You will see the new password once.", action: "Replace" },
-      async () => {
-        const r = await api("POST", `/users/${encodeURIComponent(u.id)}/reset-password`, { mode: "temporary" });
+    group("Temporary password", actions(button("Set a temporary password", confirmThen({
+      title: `Replace the password of ${u.username}?`,
+      message: "Their sessions end at once. You will see the new password once." + (otherAdmin ? " Enter your own password to confirm." : ""),
+      action: "Replace",
+      password: otherAdmin,
+    },
+      async (pw) => {
+        const body = { mode: "temporary" };
+        if (otherAdmin) body.confirm_password = pw;
+        const r = await api("POST", `/users/${encodeURIComponent(u.id)}/reset-password`, body);
         close();
         sheet("Temporary password", () => [
           h("div", { class: "notice" }, "Copy it now. It is not stored and will never be shown again."),

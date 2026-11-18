@@ -42,16 +42,23 @@ func (d *Dashboard) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	login := strings.ToLower(strings.TrimSpace(in.Username))
-	ip := d.client(r)
+	ip := d.rateKey(r)
 	if retry, blocked := d.byIP.Blocked(ip); blocked {
 		d.tooMany(w, retry)
 		return
 	}
-	if retry, blocked := d.byUser.Blocked(login); blocked {
+	// per account and address: failures from elsewhere cannot lock the
+	// account out (the per-address limit above still applies)
+	userKey := login + "|" + ip
+	if retry, blocked := d.byUser.Blocked(userKey); blocked {
 		d.tooMany(w, retry)
 		return
 	}
 
+	// Count the attempt as a failure before the slow hash, and take it back
+	// on success: simultaneous attempts cannot all get past Blocked.
+	d.byIP.Fail(ip)
+	d.byUser.Fail(userKey)
 	a, err := d.opts.Store.AccountByLogin(r.Context(), login)
 	if err != nil && !errors.Is(err, postgres.ErrNotFound) {
 		d.internal(w, "account lookup", err)
@@ -63,12 +70,12 @@ func (d *Dashboard) login(w http.ResponseWriter, r *http.Request) {
 	}
 	ok, cerr := CheckPassword(hash, in.Password)
 	if err != nil || a.PasswordHash == "" || cerr != nil || !ok {
-		d.byIP.Fail(ip)
-		d.byUser.Fail(login)
 		d.log.Warn("dashboard login failed", "client", ip)
 		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "wrong username, email or password")
 		return
 	}
+	d.byIP.Forgive(ip)
+	d.byUser.Forgive(userKey)
 	// Only someone who knows the password learns the account is disabled.
 	if a.DisabledAt != nil {
 		writeErr(w, http.StatusForbidden, "account_disabled", "this account is disabled; contact the server admin")
@@ -100,9 +107,10 @@ func (d *Dashboard) session(w http.ResponseWriter, r *http.Request) {
 }
 
 // authOptions tells the sign in page what this gateway offers. setup is
-// true while no admin exists: the page then asks for the first admin.
+// true on a fresh server (no admin, no account with a password): the page
+// then asks for the first admin.
 func (d *Dashboard) authOptions(w http.ResponseWriter, r *http.Request) {
-	hasAdmin, err := d.opts.Store.AdminExists(r.Context())
+	hasAdmin, err := d.opts.Store.SetupDone(r.Context())
 	if err != nil {
 		d.internal(w, "admin lookup", err)
 		return
@@ -129,7 +137,7 @@ func (d *Dashboard) setup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "csrf", "cross-site request refused")
 		return
 	}
-	ip := d.client(r)
+	ip := d.rateKey(r)
 	if retry, blocked := d.byIP.Blocked(ip); blocked {
 		d.tooMany(w, retry)
 		return
@@ -197,7 +205,7 @@ func validEmail(e string) bool {
 // mailLimited counts one email-sending attempt from this client and for
 // this address, and reports whether either is over its allowance.
 func (d *Dashboard) mailLimited(w http.ResponseWriter, r *http.Request) bool {
-	ip := d.client(r)
+	ip := d.rateKey(r)
 	if retry, blocked := d.mailByIP.Blocked(ip); blocked {
 		d.tooMany(w, retry)
 		return true
@@ -346,7 +354,7 @@ func (d *Dashboard) verifyEmail(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "expected JSON with token")
 		return
 	}
-	ip := d.client(r)
+	ip := d.rateKey(r)
 	if retry, blocked := d.byIP.Blocked(ip); blocked {
 		d.tooMany(w, retry)
 		return
@@ -406,18 +414,22 @@ func (d *Dashboard) byEmail(w http.ResponseWriter, r *http.Request, act func(con
 		return
 	}
 	email := postgres.NormalizeEmail(in.Email)
-	a, err := d.opts.Store.AccountByEmail(r.Context(), email)
-	switch {
-	case errors.Is(err, postgres.ErrNotFound):
-	case err != nil:
-		d.internal(w, "account lookup", err)
-		return
-	case a.DisabledAt == nil && d.addrAllowed(email):
-		if err := act(r.Context(), a); err != nil {
-			d.internal(w, "create link", err)
-			return
+	// Answer first and look the address up afterwards: registered and
+	// unknown addresses then take the same time (no timing oracle).
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		a, err := d.opts.Store.AccountByEmail(ctx, email)
+		switch {
+		case errors.Is(err, postgres.ErrNotFound):
+		case err != nil:
+			d.log.Error("dashboard: account lookup", "err", err)
+		case a.DisabledAt == nil && d.addrAllowed(email):
+			if err := act(ctx, a); err != nil {
+				d.log.Error("dashboard: create link", "err", err)
+			}
 		}
-	}
+	}()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -436,14 +448,14 @@ func (d *Dashboard) resetPassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "expected JSON with token and password")
 		return
 	}
-	hash, err := HashPassword(in.Password)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "weak_password", err.Error())
-		return
-	}
-	ip := d.client(r)
+	// rate limit first: the hash below is deliberately slow (CPU cost)
+	ip := d.rateKey(r)
 	if retry, blocked := d.byIP.Blocked(ip); blocked {
 		d.tooMany(w, retry)
+		return
+	}
+	if len([]rune(in.Password)) < MinPasswordLength { // before the link is used up
+		writeErr(w, http.StatusBadRequest, "weak_password", ErrWeakPassword.Error())
 		return
 	}
 	id, err := d.opts.Store.UseEmailLink(r.Context(), postgres.LinkReset, in.Token)
@@ -456,10 +468,16 @@ func (d *Dashboard) resetPassword(w http.ResponseWriter, r *http.Request) {
 		d.internal(w, "use link", err)
 		return
 	}
+	hash, err := HashPassword(in.Password)
+	if err != nil {
+		d.internal(w, "hash", err)
+		return
+	}
 	if err := d.opts.Store.SetPassword(r.Context(), id, hash); err != nil {
 		d.internal(w, "set password", err)
 		return
 	}
+	d.opts.Access.Revoke(id)
 	if err := d.opts.Store.SetEmailVerified(r.Context(), id, true); err != nil {
 		d.log.Warn("dashboard: confirming email after a reset failed", "err", err)
 	}

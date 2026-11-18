@@ -62,9 +62,10 @@ type Store interface {
 	AccountByEmail(ctx context.Context, email string) (postgres.Account, error)
 	TouchLogin(ctx context.Context, id string) error
 	CreateAccount(ctx context.Context, n postgres.NewAccount) (string, error)
-	AdminExists(ctx context.Context) (bool, error)
+	SetupDone(ctx context.Context) (bool, error)
 	CreateFirstAdmin(ctx context.Context, n postgres.NewAccount) (string, error)
 	SetPassword(ctx context.Context, id, hash string) error
+	EndSessions(ctx context.Context, id string) error
 	SetEmailVerified(ctx context.Context, id string, verified bool) error
 	SetEmail(ctx context.Context, id, email string) error
 	SetLimits(ctx context.Context, id string, maxTokens, maxCustomDomains *int) error
@@ -267,6 +268,10 @@ func New(opts Options) *Dashboard {
 }
 
 func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Dashboard requests are small JSON: a client that sends its body slowly
+	// is cut off instead of holding a connection forever. (Tunnel traffic
+	// has no such limit: uploads through a tunnel may take long.)
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(30 * time.Second))
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
@@ -342,6 +347,19 @@ func (d *Dashboard) sameOrigin(r *http.Request) bool {
 
 func (d *Dashboard) client(r *http.Request) string {
 	return netutil.ClientFromRequest(r, d.opts.TrustedProxies).IP
+}
+
+// rateKey is the client address for rate limits: an IPv6 address counts
+// as its /64, which one customer usually holds whole (otherwise a single
+// connection could rotate through 2^64 addresses and never be limited).
+func (d *Dashboard) rateKey(r *http.Request) string {
+	ip := d.client(r)
+	if a, err := netip.ParseAddr(ip); err == nil && a.Is6() && !a.Is4In6() {
+		if p, err := a.Prefix(64); err == nil {
+			return p.String()
+		}
+	}
+	return ip
 }
 
 type ctxAccount struct{}

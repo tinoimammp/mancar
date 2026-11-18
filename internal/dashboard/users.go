@@ -90,12 +90,32 @@ func (d *Dashboard) target(w http.ResponseWriter, r *http.Request) (postgres.Acc
 	return a, true
 }
 
+// confirmSelf checks the acting admin's own password before a change that
+// could hand someone an admin account: making an admin, and giving an
+// existing admin a new password or email address (which a stolen session
+// could otherwise use to take that admin over). It writes the error itself.
+func (d *Dashboard) confirmSelf(w http.ResponseWriter, me postgres.Account, password, why string) bool {
+	if retry, blocked := d.byUser.Blocked(me.Username); blocked {
+		d.tooMany(w, retry)
+		return false
+	}
+	if ok, _ := CheckPassword(me.PasswordHash, password); !ok {
+		d.byUser.Fail(me.Username)
+		writeErr(w, http.StatusForbidden, "confirm_password", "enter your own password to "+why)
+		return false
+	}
+	return true
+}
+
 func (d *Dashboard) createUser(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Username string `json:"username"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
 		Role     string `json:"role"`
+		// ConfirmPassword is the acting admin's own password, needed to
+		// create an admin.
+		ConfirmPassword string `json:"confirm_password"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", "expected JSON with username, email, password and role")
@@ -112,6 +132,9 @@ func (d *Dashboard) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	case in.Role != postgres.RoleAdmin && in.Role != postgres.RoleUser:
 		writeErr(w, http.StatusBadRequest, "invalid_role", "role must be admin or user")
+		return
+	}
+	if in.Role == postgres.RoleAdmin && !d.confirmSelf(w, accountFrom(r), in.ConfirmPassword, "create an admin") {
 		return
 	}
 	hash, err := HashPassword(in.Password)
@@ -170,7 +193,7 @@ func (d *Dashboard) updateUser(w http.ResponseWriter, r *http.Request) {
 		MaxTokens        optInt  `json:"max_tokens"`
 		MaxCustomDomains optInt  `json:"max_custom_domains"`
 		// ConfirmPassword is the acting admin's own password, needed to
-		// make someone an admin.
+		// make someone an admin or change another admin's email.
 		ConfirmPassword string `json:"confirm_password"`
 	}
 	if err := readJSON(r, &in); err != nil {
@@ -178,6 +201,14 @@ func (d *Dashboard) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	self := t.ID == me.ID
+	promote := in.Role != nil && *in.Role == postgres.RoleAdmin && t.Role != postgres.RoleAdmin
+	adminEmail := in.Email != nil && postgres.NormalizeEmail(*in.Email) != t.Email && t.IsAdmin() && !self
+	switch {
+	case promote && !d.confirmSelf(w, me, in.ConfirmPassword, "make someone an admin"):
+		return
+	case !promote && adminEmail && !d.confirmSelf(w, me, in.ConfirmPassword, "change another admin's email"):
+		return
+	}
 	if self && (in.Role != nil || (in.Disabled != nil && *in.Disabled)) {
 		writeErr(w, http.StatusConflict, "self", "you cannot change your own role or disable yourself")
 		return
@@ -204,17 +235,6 @@ func (d *Dashboard) updateUser(w http.ResponseWriter, r *http.Request) {
 		if role != postgres.RoleAdmin && role != postgres.RoleUser {
 			writeErr(w, http.StatusBadRequest, "invalid_role", "role must be admin or user")
 			return
-		}
-		if role == postgres.RoleAdmin {
-			if retry, blocked := d.byUser.Blocked(me.Username); blocked {
-				d.tooMany(w, retry)
-				return
-			}
-			if ok, _ := CheckPassword(me.PasswordHash, in.ConfirmPassword); !ok {
-				d.byUser.Fail(me.Username)
-				writeErr(w, http.StatusForbidden, "confirm_password", "enter your own password to make someone an admin")
-				return
-			}
 		}
 		if fail("set role", d.opts.Store.SetRole(ctx, t.ID, role)) {
 			return
@@ -318,17 +338,23 @@ func (d *Dashboard) revokeUserTokens(w http.ResponseWriter, r *http.Request) {
 
 // adminResetPassword emails a reset link (mode "email") or sets a random
 // temporary password shown once to the admin (mode "temporary"). Either way
-// the account's sessions end.
+// the account's sessions end. A temporary password for another admin needs
+// the acting admin's own password.
 func (d *Dashboard) adminResetPassword(w http.ResponseWriter, r *http.Request) {
 	t, ok := d.target(w, r)
 	if !ok {
 		return
 	}
 	var in struct {
-		Mode string `json:"mode"`
+		Mode            string `json:"mode"`
+		ConfirmPassword string `json:"confirm_password"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", "expected JSON with mode")
+		return
+	}
+	me := accountFrom(r)
+	if in.Mode == "temporary" && t.IsAdmin() && t.ID != me.ID && !d.confirmSelf(w, me, in.ConfirmPassword, "give another admin a new password") {
 		return
 	}
 	switch in.Mode {
@@ -341,6 +367,11 @@ func (d *Dashboard) adminResetPassword(w http.ResponseWriter, r *http.Request) {
 			d.internal(w, "create link", err)
 			return
 		}
+		if err := d.opts.Store.EndSessions(r.Context(), t.ID); err != nil {
+			d.internal(w, "end sessions", err)
+			return
+		}
+		d.opts.Access.Revoke(t.ID)
 		d.audit(r, "user.reset_password", t.Username, "link emailed")
 		w.WriteHeader(http.StatusNoContent)
 	case "temporary":
@@ -359,6 +390,7 @@ func (d *Dashboard) adminResetPassword(w http.ResponseWriter, r *http.Request) {
 			d.internal(w, "set password", err)
 			return
 		}
+		d.opts.Access.Revoke(t.ID)
 		d.audit(r, "user.reset_password", t.Username, "temporary password")
 		writeJSON(w, http.StatusOK, map[string]string{"password": pw})
 	default:

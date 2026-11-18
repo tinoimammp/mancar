@@ -236,12 +236,18 @@ func TestAccounts_PurgeUnconfirmedAndAudit(t *testing.T) {
 	ok, _ := st.CreateAccount(ctx, postgres.NewAccount{Username: "ok", Email: "ok@example.com", PasswordHash: "h", SignedUp: true})
 	st.SetEmailVerified(ctx, ok, true)
 	st.EnsureUser(ctx, "tokenonly")
+	// in use, but unconfirmed again after an admin changed the address
+	used, _ := st.CreateAccount(ctx, postgres.NewAccount{Username: "used", Email: "used@example.com", PasswordHash: "h", SignedUp: true})
+	st.TouchLogin(ctx, used)
 	n, err := st.PurgeUnconfirmed(ctx, time.Now().Add(time.Minute))
 	if err != nil || n != 1 {
 		t.Fatalf("PurgeUnconfirmed: %d %v", n, err)
 	}
 	if _, err := st.AccountByID(ctx, stale); !errors.Is(err, postgres.ErrNotFound) {
 		t.Error("unconfirmed sign up kept")
+	}
+	if _, err := st.AccountByID(ctx, used); err != nil {
+		t.Errorf("an account that signed in was purged: %v", err)
 	}
 
 	st.AddAudit(ctx, postgres.AuditEntry{Actor: "root", Action: "user.disable", Target: "ok"})
@@ -296,7 +302,7 @@ func TestMigrate_AdminsMergeIntoUsers(t *testing.T) {
 func TestAccounts_FirstAdminSetup(t *testing.T) {
 	st := newStore(t, true)
 	ctx := context.Background()
-	if ok, err := st.AdminExists(ctx); err != nil || ok {
+	if ok, err := st.SetupDone(ctx); err != nil || ok {
 		t.Fatalf("fresh database: %v %v", ok, err)
 	}
 	// two setups at once: exactly one wins
@@ -321,7 +327,64 @@ func TestAccounts_FirstAdminSetup(t *testing.T) {
 	if won != 1 || lost != 1 {
 		t.Errorf("won %d, lost %d", won, lost)
 	}
-	if ok, _ := st.AdminExists(ctx); !ok {
+	if ok, _ := st.SetupDone(ctx); !ok {
 		t.Error("no admin after setup")
+	}
+	// demoting the last admin must not reopen the public setup page
+	a, _ := st.AccountByLogin(ctx, "first")
+	if a.ID == "" {
+		a, _ = st.AccountByLogin(ctx, "second")
+	}
+	if err := st.DeleteAdmin(ctx, a.Username); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := st.SetupDone(ctx); !ok {
+		t.Error("setup reopened after the last admin was demoted")
+	}
+	if _, err := st.CreateFirstAdmin(ctx, postgres.NewAccount{Username: "intruder", PasswordHash: "h"}); !errors.Is(err, postgres.ErrSetupDone) {
+		t.Errorf("CreateFirstAdmin after demotion: %v", err)
+	}
+}
+
+// "mancard admin set NAME" must not promote an account someone made by
+// signing up with that name first: their email could reset the password.
+func TestAccounts_AdminSetLeavesSignUpsAlone(t *testing.T) {
+	st := newStore(t, true)
+	ctx := context.Background()
+	if _, err := st.CreateAccount(ctx, postgres.NewAccount{Username: "admin", Email: "eve@example.com", PasswordHash: "h", SignedUp: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetAdmin(ctx, "admin", "new"); !errors.Is(err, postgres.ErrHasEmail) {
+		t.Fatalf("SetAdmin on a sign up: %v", err)
+	}
+	a, err := st.AccountByLogin(ctx, "admin")
+	if err != nil || a.Role != postgres.RoleUser || a.PasswordHash != "h" {
+		t.Errorf("the sign up was changed: %+v %v", a, err)
+	}
+	// a token-only user (no email) is still promoted as before
+	if _, err := st.EnsureUser(ctx, "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := st.SetAdmin(ctx, "ops", "h2"); err != nil || created {
+		t.Errorf("SetAdmin on a token-only user: %v %v", created, err)
+	}
+}
+
+func TestPendingMigrations(t *testing.T) {
+	st := newStore(t, false)
+	ctx := context.Background()
+	fsys := fstest.MapFS{"0001_a.sql": {Data: []byte("CREATE TABLE a (x int);")}}
+	if pending, fresh, err := st.PendingMigrations(ctx, fsys); err != nil || !fresh || len(pending) != 1 {
+		t.Fatalf("never migrated: %v %v %v", pending, fresh, err)
+	}
+	if err := st.Migrate(ctx, fsys); err != nil {
+		t.Fatal(err)
+	}
+	if pending, fresh, err := st.PendingMigrations(ctx, fsys); err != nil || fresh || len(pending) != 0 {
+		t.Errorf("up to date: %v %v %v", pending, fresh, err)
+	}
+	fsys["0002_b.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE b (x int);")}
+	if pending, fresh, err := st.PendingMigrations(ctx, fsys); err != nil || fresh || len(pending) != 1 || pending[0] != "0002_b.sql" {
+		t.Errorf("one behind: %v %v %v", pending, fresh, err)
 	}
 }

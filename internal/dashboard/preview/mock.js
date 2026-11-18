@@ -363,7 +363,7 @@
       const tunnel = String(body.target).split(/[/?]/)[0];
       if (!tunnel.endsWith("." + host)) return json({ error: { code: "not_found", message: "not a tunnel of this server" } }, 404);
       const owner = session && session.username === "tino" && tunnel === `lunar-panther.${host}`;
-      return json({ url: (owner ? "tunnel.html?host=" : "restricted.html?host=") + encodeURIComponent(tunnel), allowed: owner });
+      return json({ url: (owner ? "tunnel.html?host=" : "restricted.html?host=") + encodeURIComponent(tunnel), allowed: owner, owner });
     }
     const dev = path.match(/^\/device\/([A-Z0-9-]+)(\/(approve|deny))?$/i);
     if (dev) return dev[2] ? json(null, 204) : json({ user_code: dev[1].toUpperCase(), name: "MacBook-Pro-Tino", created_at: at(0.2) });

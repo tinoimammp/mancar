@@ -60,20 +60,17 @@ func (s *Store) Ping(ctx context.Context) error { return s.DB.PingContext(ctx) }
 const migrationLockID = 724195301
 
 // Migrate applies pending migrations from fsys. It is safe to run from
-// several processes at once (advisory lock) and each migration is atomic.
+// several processes at once and each migration is atomic. The lock is a
+// transaction-level advisory lock taken in each migration's own
+// transaction, so it also works through PgBouncer in transaction pooling
+// mode (a session-level lock could be taken on one server connection and
+// released on another).
 func (s *Store) Migrate(ctx context.Context, fsys fs.FS) error {
-	conn, err := s.DB.Conn(ctx)
-	if err != nil {
+	if err := s.migrationTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+			version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`)
 		return err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationLockID); err != nil {
-		return err
-	}
-	defer conn.ExecContext(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, migrationLockID)
-
-	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
-		version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+	}); err != nil {
 		return err
 	}
 	names, err := fs.Glob(fsys, "*.sql")
@@ -83,35 +80,76 @@ func (s *Store) Migrate(ctx context.Context, fsys fs.FS) error {
 	sort.Strings(names)
 	for _, name := range names {
 		version := strings.TrimSuffix(name, ".sql")
-		var exists bool
-		if err := conn.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`,
-			version).Scan(&exists); err != nil {
+		err := s.migrationTx(ctx, func(tx *sql.Tx) error {
+			var exists bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`,
+				version).Scan(&exists); err != nil {
+				return err
+			}
+			if exists { // checked under the lock: another process may have just applied it
+				return nil
+			}
+			body, err := fs.ReadFile(fsys, name)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, string(body)); err != nil {
+				return fmt.Errorf("migration %s: %w", name, err)
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES ($1)`, version)
 			return err
-		}
-		if exists {
-			continue
-		}
-		body, err := fs.ReadFile(fsys, name)
+		})
 		if err != nil {
 			return err
-		}
-		tx, err := conn.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("migration %s: %w", name, err)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES ($1)`, version); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("migration %s: %w", name, err)
 		}
 	}
 	return nil
+}
+
+// migrationTx runs fn in a transaction holding the migration lock.
+func (s *Store) migrationTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockID); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// PendingMigrations lists the migrations in fsys not applied yet. fresh is
+// true for a database that was never migrated at all.
+func (s *Store) PendingMigrations(ctx context.Context, fsys fs.FS) (pending []string, fresh bool, err error) {
+	var applied int
+	err = s.DB.QueryRowContext(ctx, `SELECT CASE WHEN to_regclass('schema_migrations') IS NULL THEN -1
+		ELSE (SELECT count(*) FROM schema_migrations) END`).Scan(&applied)
+	if err != nil {
+		return nil, false, err
+	}
+	names, err := fs.Glob(fsys, "*.sql")
+	if err != nil {
+		return nil, false, err
+	}
+	sort.Strings(names)
+	if applied <= 0 {
+		return names, true, nil
+	}
+	for _, name := range names {
+		var done bool
+		if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`,
+			strings.TrimSuffix(name, ".sql")).Scan(&done); err != nil {
+			return nil, false, err
+		}
+		if !done {
+			pending = append(pending, name)
+		}
+	}
+	return pending, false, nil
 }
 
 // ---- users and agent tokens -------------------------------------------

@@ -516,6 +516,7 @@ func TestPrivateTunnelAccess(t *testing.T) {
 			{Proto: "http", Hostname: "root.tunnel.example.com", PublicURL: "https://root.tunnel.example.com", Private: true},
 			{Proto: "http", Hostname: "team.tunnel.example.com", PublicURL: "https://team.tunnel.example.com", Private: true,
 				SharedWith: []string{"tino"}, AllowIDs: []string{"u-tino"}},
+			{Proto: "http", Hostname: "phish.tunnel.example.com", PublicURL: "https://phish.tunnel.example.com"},
 		}},
 	}}
 	d := dashboard.New(dashboard.Options{Store: st, Hub: hub, SessionSecret: strings.Repeat("s", 32), Secure: true,
@@ -536,8 +537,8 @@ func TestPrivateTunnelAccess(t *testing.T) {
 	if err != nil || u.Host != "app.tunnel.example.com" || u.Path != access.Path || u.Query().Get("next") != "/x?y=1" {
 		t.Fatalf("url = %v", out["url"])
 	}
-	if out["allowed"] != true {
-		t.Errorf("allowed = %v", out["allowed"])
+	if out["allowed"] != true || out["owner"] != true {
+		t.Errorf("allowed = %v, owner = %v", out["allowed"], out["owner"])
 	}
 	if user, ok := k.Redeem(u.Query().Get("ticket"), "app.tunnel.example.com"); !ok || user != "u-tino" {
 		t.Errorf("ticket: %q %v", user, ok)
@@ -545,18 +546,26 @@ func TestPrivateTunnelAccess(t *testing.T) {
 	if code, out := ask("open.tunnel.example.com//evil.com", true); code != http.StatusOK || out["url"] != "https://open.tunnel.example.com/" {
 		t.Errorf("own public tunnel: %d %v", code, out)
 	}
-	// someone else's tunnel looks exactly like one that is offline: back
-	// to the plain address (the Restricted page), no ticket
-	codeOther, other := ask("root.tunnel.example.com/a", true)
-	codeOff, off := ask("gone.tunnel.example.com/a", true)
-	if codeOther != http.StatusOK || other["url"] != "https://root.tunnel.example.com/a" || other["allowed"] != false ||
-		codeOff != http.StatusOK || strings.Replace(fmt.Sprint(other), "root", "gone", 1) != fmt.Sprint(off) {
-		t.Errorf("another account's tunnel: %d %v / offline: %d %v", codeOther, other, codeOff, off)
+	// someone else's private tunnel: back to its Restricted page, no ticket
+	if code, out := ask("root.tunnel.example.com/a", true); code != http.StatusOK || out["url"] != "https://root.tunnel.example.com/a" || out["allowed"] != false {
+		t.Errorf("another account's private tunnel: %d %v", code, out)
 	}
-	// root shared team.* with tino (--allow tino)
-	if code, out := ask("team.tunnel.example.com/", true); code != http.StatusOK || out["allowed"] != true ||
+	// someone else's public tunnel, or nothing there: no URL at all, so the
+	// dashboard never forwards a signed-in person to an arbitrary app
+	codePub, pub := ask("phish.tunnel.example.com/login", true)
+	codeOff, off := ask("gone.tunnel.example.com/a", true)
+	if codePub != http.StatusOK || pub["url"] != "" || pub["allowed"] != false || codeOff != http.StatusOK || fmt.Sprint(pub) != fmt.Sprint(off) {
+		t.Errorf("another account's public tunnel: %d %v / offline: %d %v", codePub, pub, codeOff, off)
+	}
+	// root shared team.* with tino (--allow tino): allowed, but not the owner
+	if code, out := ask("team.tunnel.example.com/", true); code != http.StatusOK || out["allowed"] != true || out["owner"] != false ||
 		!strings.HasPrefix(fmt.Sprint(out["url"]), "https://team.tunnel.example.com"+access.Path+"?") {
 		t.Errorf("tunnel shared with this account: %d %v", code, out)
+	}
+	// ... but not while tino's email is unconfirmed (shared by address)
+	st.SetEmail(t.Context(), "u-tino", "tino2@example.com")
+	if code, out := ask("team.tunnel.example.com/", true); code != http.StatusOK || out["allowed"] != false {
+		t.Errorf("shared tunnel with an unconfirmed email: %d %v", code, out)
 	}
 	// never a redirect off this server
 	for _, target := range []string{"evil.com/", "tunnel.example.com/", "x.tunnel.example.com.evil.com/", "a_b.tunnel.example.com/"} {
@@ -581,5 +590,93 @@ func TestRestrictedPage(t *testing.T) {
 		!strings.Contains(body, `url("https://tunnel.example.com/dashboard/logo.webp")`) ||
 		!strings.Contains(rec.Header().Get("Content-Security-Policy"), "img-src https://tunnel.example.com;") {
 		t.Errorf("body:\n%s", body)
+	}
+}
+
+// The public first-run page is only for a fresh server: once any account
+// has a password, losing the last admin does not reopen it.
+func TestSetupStaysClosedWithoutAdmins(t *testing.T) {
+	st := newFakeStore()
+	st.add(postgres.Account{ID: "t1", Username: "token-only"}) // from "mancard token create": no password
+	d := dashboard.New(dashboard.Options{Store: st, Hub: &fakeHub{}, SessionSecret: strings.Repeat("s", 32), Secure: true})
+	setup := func() any {
+		var out map[string]any
+		json.Unmarshal(do(d, req{method: "GET", path: "/api/v1/auth/options"}).Body.Bytes(), &out)
+		return out["setup"]
+	}
+	if setup() != true {
+		t.Fatal("a server with only token users should offer setup")
+	}
+	st.add(postgres.Account{ID: "u1", Username: "former-admin", PasswordHash: "h"}) // demoted last admin
+	if setup() != false {
+		t.Error("setup reopened although an account with a password exists")
+	}
+	if rec := do(d, req{method: "POST", path: "/api/v1/auth/setup", csrf: true,
+		body: `{"username":"intruder","email":"i@example.com","password":"` + password + `"}`}); rec.Code == http.StatusOK || rec.Code == http.StatusCreated {
+		t.Errorf("setup accepted: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A stolen admin session must not be enough to make or take over admins:
+// each of these needs the acting admin's own password.
+func TestAdminTakeoverNeedsOwnPassword(t *testing.T) {
+	d, st, _ := setupAccounts(t)
+	hash, _ := dashboard.HashPassword(password)
+	st.add(postgres.Account{ID: "a2", Username: "ops", Role: postgres.RoleAdmin, Email: "ops@example.com", PasswordHash: hash, PasswordChangedAt: time.Now().Add(-time.Hour)})
+	c := loginAs(t, d, "root", password)
+	send := func(method, path, body string) int {
+		return do(d, req{method: method, path: path, body: body, cookie: c, csrf: true}).Code
+	}
+	newAdmin := `{"username":"mallory","email":"","password":"` + password + `","role":"admin"`
+	cases := []struct{ name, method, path, without, with string }{
+		{"create an admin", "POST", "/api/v1/admin/users", newAdmin + `}`, newAdmin + `,"confirm_password":"` + password + `"}`},
+		{"temporary password for another admin", "POST", "/api/v1/admin/users/a2/reset-password", `{"mode":"temporary"}`, `{"mode":"temporary","confirm_password":"` + password + `"}`},
+		{"another admin's email", "PATCH", "/api/v1/admin/users/a2", `{"email":"mallory@example.com"}`, `{"email":"mallory@example.com","confirm_password":"` + password + `"}`},
+	}
+	for _, tc := range cases {
+		if code := send(tc.method, tc.path, tc.without); code != http.StatusForbidden {
+			t.Errorf("%s without the password: %d", tc.name, code)
+		}
+		if code := send(tc.method, tc.path, tc.with); code/100 != 2 {
+			t.Errorf("%s with the password: %d", tc.name, code)
+		}
+	}
+	// a plain user's temporary password needs no extra step
+	if code := send("POST", "/api/v1/admin/users/u-tino/reset-password", `{"mode":"temporary"}`); code != http.StatusOK {
+		t.Errorf("temporary password for a user: %d", code)
+	}
+}
+
+func loginFrom(d http.Handler, addr, user, pw string) int {
+	q := httptest.NewRequest("POST", "https://tunnel.example.com/api/v1/auth/login",
+		strings.NewReader(`{"username":"`+user+`","password":"`+pw+`"}`))
+	q.RemoteAddr = addr
+	q.Header.Set(dashboard.HeaderCSRF, "1")
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, q)
+	return rec.Code
+}
+
+// Someone guessing tino's password from elsewhere must not lock tino out,
+// and an IPv6 client cannot dodge the limit by changing its address.
+func TestLoginLimits(t *testing.T) {
+	d, _, _ := setupAccounts(t)
+	for i := 0; i < 10; i++ {
+		loginFrom(d, "203.0.113.1:1000", "tino", "wrong wrong wrong")
+	}
+	if code := loginFrom(d, "203.0.113.1:1000", "tino", password); code != http.StatusTooManyRequests {
+		t.Errorf("the guessing address should be blocked: %d", code)
+	}
+	if code := loginFrom(d, "198.51.100.9:1000", "tino", password); code != http.StatusOK {
+		t.Errorf("tino from another address was locked out: %d", code)
+	}
+	for i := 0; i < 10; i++ {
+		loginFrom(d, fmt.Sprintf("[2001:db8:1:2::%x]:1000", i+1), "root", "wrong wrong wrong")
+	}
+	if code := loginFrom(d, "[2001:db8:1:2::ffff]:1000", "root", password); code != http.StatusTooManyRequests {
+		t.Errorf("a new address in the same IPv6 /64 should still be blocked: %d", code)
+	}
+	if code := loginFrom(d, "[2001:db8:1:3::1]:1000", "root", password); code != http.StatusOK {
+		t.Errorf("another /64: %d", code)
 	}
 }

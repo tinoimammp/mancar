@@ -110,9 +110,8 @@ func cmdUser(ctx context.Context, e Env, args []string) int {
 			return 1
 		}
 		defer st.Close()
-		if err := st.Migrate(ctx, migrations.FS); err != nil {
-			fmt.Fprintf(e.Stderr, "mancard: migration failed: %v\n", err)
-			return 1
+		if code := ensureSchema(ctx, e, st); code != 0 {
+			return code
 		}
 		fail := func(err error) int {
 			switch {
@@ -263,4 +262,27 @@ func printPassword(e Env, generated bool, password string) {
 	}
 	fmt.Fprintln(e.Stdout, password)
 	fmt.Fprintln(e.Stderr, "The generated password above is shown only once; store it safely.")
+}
+
+// ensureSchema prepares a database that was never used (so accounts can be
+// made before the first start), but does not upgrade one in use: a newer
+// mancard (say from "docker compose run" pulling the latest image) would
+// change the schema under the gateway that is still running.
+func ensureSchema(ctx context.Context, e Env, st *postgres.Store) int {
+	pending, fresh, err := st.PendingMigrations(ctx, migrations.FS)
+	switch {
+	case err != nil:
+		fmt.Fprintf(e.Stderr, "mancard: checking the database: %v\n", err)
+		return 1
+	case fresh:
+		if err := st.Migrate(ctx, migrations.FS); err != nil {
+			fmt.Fprintf(e.Stderr, "mancard: migration failed: %v\n", err)
+			return 1
+		}
+	case len(pending) > 0:
+		fmt.Fprintf(e.Stderr, "mancard: the database is older than this mancard (%d migration(s) pending).\n"+
+			"Upgrade the gateway first (docker compose pull && docker compose up -d), then run this again.\n", len(pending))
+		return 1
+	}
+	return 0
 }

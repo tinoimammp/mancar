@@ -76,9 +76,9 @@ func (f *fakeStore) AccountByEmail(_ context.Context, email string) (postgres.Ac
 	return postgres.Account{}, postgres.ErrNotFound
 }
 
-func (f *fakeStore) AdminExists(context.Context) (bool, error) {
+func (f *fakeStore) SetupDone(context.Context) (bool, error) {
 	for _, a := range f.accounts {
-		if a.IsAdmin() {
+		if a.IsAdmin() || a.PasswordHash != "" {
 			return true, nil
 		}
 	}
@@ -86,7 +86,7 @@ func (f *fakeStore) AdminExists(context.Context) (bool, error) {
 }
 
 func (f *fakeStore) CreateFirstAdmin(ctx context.Context, n postgres.NewAccount) (string, error) {
-	if ok, _ := f.AdminExists(ctx); ok {
+	if ok, _ := f.SetupDone(ctx); ok {
 		return "", postgres.ErrSetupDone
 	}
 	n.Role, n.Verified = postgres.RoleAdmin, true
@@ -131,6 +131,10 @@ func (f *fakeStore) update(id string, change func(*postgres.Account)) error {
 
 func (f *fakeStore) SetPassword(_ context.Context, id, hash string) error {
 	return f.update(id, func(a *postgres.Account) { a.PasswordHash, a.PasswordChangedAt = hash, time.Now() })
+}
+
+func (f *fakeStore) EndSessions(_ context.Context, id string) error {
+	return f.update(id, func(a *postgres.Account) { a.PasswordChangedAt = time.Now() })
 }
 
 func (f *fakeStore) SetEmailVerified(_ context.Context, id string, v bool) error {

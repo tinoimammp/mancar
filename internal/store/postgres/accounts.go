@@ -196,18 +196,24 @@ func (s *Store) CreateAccount(ctx context.Context, n NewAccount) (string, error)
 	return id, uniqueErr(err)
 }
 
-// ErrSetupDone means an admin already exists, so first-run setup is closed.
-var ErrSetupDone = errors.New("postgres: an admin already exists")
+// ErrSetupDone means the server has been set up, so first-run setup is closed.
+var ErrSetupDone = errors.New("postgres: the server is already set up")
 
-// AdminExists reports whether any admin account exists (enabled or not).
-func (s *Store) AdminExists(ctx context.Context) (bool, error) {
+// setupDoneSQL: the server counts as set up once any account is an admin or
+// has a password. Removing or demoting the last admin later must not reopen
+// the public first-run page (anyone could become admin); the way back is
+// "mancard user role NAME admin" on the server.
+const setupDoneSQL = `SELECT EXISTS (SELECT 1 FROM users WHERE role = 'admin' OR password_hash IS NOT NULL)`
+
+// SetupDone reports whether first-run setup is over (see setupDoneSQL).
+func (s *Store) SetupDone(ctx context.Context) (bool, error) {
 	var ok bool
-	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE role = 'admin')`).Scan(&ok)
+	err := s.DB.QueryRowContext(ctx, setupDoneSQL).Scan(&ok)
 	return ok, err
 }
 
-// CreateFirstAdmin creates an admin only while no admin exists (first-run
-// setup in the dashboard). The table lock makes two concurrent setups
+// CreateFirstAdmin creates an admin only while the server is not set up
+// (first-run setup in the dashboard, see setupDoneSQL). The table lock makes two concurrent setups
 // impossible: exactly one wins, the other gets ErrSetupDone.
 func (s *Store) CreateFirstAdmin(ctx context.Context, n NewAccount) (string, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -219,7 +225,7 @@ func (s *Store) CreateFirstAdmin(ctx context.Context, n NewAccount) (string, err
 		return "", err
 	}
 	var exists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE role = 'admin')`).Scan(&exists); err != nil {
+	if err := tx.QueryRowContext(ctx, setupDoneSQL).Scan(&exists); err != nil {
 		return "", err
 	}
 	if exists {
@@ -248,6 +254,12 @@ func (s *Store) TouchLogin(ctx context.Context, id string) error {
 // SetPassword replaces the password; sessions issued before now end.
 func (s *Store) SetPassword(ctx context.Context, id, hash string) error {
 	return s.exec1(ctx, `UPDATE users SET password_hash = $2, password_changed_at = now(), updated_at = now() WHERE id::text = $1`, id, hash)
+}
+
+// EndSessions signs the account out everywhere (its dashboard sessions
+// started before now stop working), without changing the password.
+func (s *Store) EndSessions(ctx context.Context, id string) error {
+	return s.exec1(ctx, `UPDATE users SET password_changed_at = now(), updated_at = now() WHERE id::text = $1`, id)
 }
 
 // SetEmailVerified confirms (or un-confirms) the account's email.
@@ -342,15 +354,27 @@ func exec1(res sql.Result, err error) error {
 	return nil
 }
 
-// SetAdmin creates an admin or gives an existing account the admin role and
-// a new password ("mancard admin set"). Changing the password ends that
-// account's sessions.
+// ErrHasEmail means "mancard admin set" found an account with an email
+// address (typically one made by web sign up): promoting it would leave
+// that address able to reset the new admin's password.
+var ErrHasEmail = errors.New("postgres: the account has an email address")
+
+// SetAdmin creates an admin or gives an existing account without an email
+// address the admin role and a new password ("mancard admin set").
+// Changing the password ends that account's sessions. An account with an
+// email address is left alone (ErrHasEmail): whoever owns that address,
+// for example someone who signed up with the name first, could reset the
+// password and take the admin role over.
 func (s *Store) SetAdmin(ctx context.Context, username, passwordHash string) (created bool, err error) {
 	err = s.DB.QueryRowContext(ctx, `
 		INSERT INTO users (username, password_hash, role) VALUES ($1, $2, 'admin')
 		ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin',
 			disabled_at = NULL, password_changed_at = now(), updated_at = now()
+		WHERE users.email IS NULL AND NOT users.signed_up
 		RETURNING xmax = 0`, strings.ToLower(strings.TrimSpace(username)), passwordHash).Scan(&created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrHasEmail
+	}
 	return created, err
 }
 
@@ -380,14 +404,17 @@ func (s *Store) DeleteAdmin(ctx context.Context, username string) error {
 		strings.ToLower(strings.TrimSpace(username)))
 }
 
-// PurgeUnconfirmed deletes web sign-ups that never confirmed their email and
-// were created before olderThan, and expired email links.
+// PurgeUnconfirmed deletes abandoned web sign-ups, and expired email links.
+// An abandoned sign-up never confirmed its email, never signed in, has no
+// tokens, and was not changed (by itself or an admin, e.g. a new email
+// address) since olderThan; an account in real use is never caught.
 func (s *Store) PurgeUnconfirmed(ctx context.Context, olderThan time.Time) (int64, error) {
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM email_tokens WHERE expires_at < now()`); err != nil {
 		return 0, err
 	}
 	res, err := s.DB.ExecContext(ctx, `DELETE FROM users
-		WHERE signed_up AND role = 'user' AND email_verified_at IS NULL AND created_at < $1
+		WHERE signed_up AND role = 'user' AND email_verified_at IS NULL AND email IS NOT NULL
+		  AND last_login_at IS NULL AND created_at < $1 AND updated_at < $1
 		  AND NOT EXISTS (SELECT 1 FROM agent_tokens t WHERE t.user_id = users.id)`, olderThan)
 	if err != nil {
 		return 0, err

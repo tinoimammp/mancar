@@ -236,6 +236,7 @@ func (d *Dashboard) myChangePassword(w http.ResponseWriter, r *http.Request) {
 		d.internal(w, "set password", err)
 		return
 	}
+	d.opts.Access.Revoke(a.ID) // private tunnel access ends with the old sessions
 	// other sessions end; this one continues with a fresh cookie
 	if b, err := d.opts.Store.AccountByID(r.Context(), a.ID); err == nil {
 		d.startSession(w, b)
@@ -282,8 +283,10 @@ func (d *Dashboard) myDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// disconnectUser ends every agent session of an account.
+// disconnectUser ends every agent session of an account, and its access to
+// private tunnels (disabled or deleted accounts).
 func (d *Dashboard) disconnectUser(id string) int {
+	d.opts.Access.Revoke(id)
 	n := 0
 	for _, s := range d.opts.Hub.Sessions() {
 		if s.UserID == id && d.opts.Hub.Disconnect(s.ID) {

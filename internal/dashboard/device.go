@@ -85,7 +85,7 @@ func normalizeUserCode(s string) string {
 
 // deviceStart creates a request (no session: the caller is the CLI).
 func (d *Dashboard) deviceStart(w http.ResponseWriter, r *http.Request) {
-	ip := d.client(r)
+	ip := d.rateKey(r)
 	if retry, blocked := d.deviceByIP.Blocked(ip); blocked {
 		d.tooMany(w, retry)
 		return
@@ -239,7 +239,7 @@ func (d *Dashboard) myDeviceApprove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "this code is unknown, expired or already used; run mancar login again")
 		return
 	}
-	tok, _, status, code, msg := d.createOwnToken(r, a, name)
+	tok, tokID, status, code, msg := d.createOwnToken(r, a, name)
 	if status != 0 {
 		writeErr(w, status, code, msg)
 		return
@@ -250,8 +250,13 @@ func (d *Dashboard) myDeviceApprove(w http.ResponseWriter, r *http.Request) {
 		req.approved, req.token, req.username = true, tok, a.Username
 	}
 	d.devices.mu.Unlock()
-	if !ok { // expired while the token was being made: do not leave it unused
-		writeErr(w, http.StatusGone, "expired_token", "the sign-in expired; run mancar login again")
+	if !ok {
+		// expired, or allowed in another tab, while the token was being
+		// made: revoke it rather than leave an active token nobody holds
+		if err := d.opts.Store.RevokeAgentToken(r.Context(), tokID); err != nil {
+			d.log.Warn("dashboard: revoking an undelivered device token failed", "err", err)
+		}
+		writeErr(w, http.StatusGone, "expired_token", "the sign-in expired or was already allowed; run mancar login again")
 		return
 	}
 	d.audit(r, "device.login", a.Username, name)

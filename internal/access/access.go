@@ -51,8 +51,9 @@ type Keeper struct {
 	secure bool
 	now    func() time.Time
 
-	mu   sync.Mutex
-	used map[string]time.Time // ticket nonce -> expiry
+	mu      sync.Mutex
+	used    map[string]time.Time // ticket nonce -> expiry
+	revoked map[string]time.Time // account ID -> cookies issued before this are void
 }
 
 // New derives the signing key from the gateway secret. secure is true when
@@ -60,7 +61,7 @@ type Keeper struct {
 func New(secret string, secure bool) *Keeper {
 	m := hmac.New(sha256.New, []byte(secret))
 	m.Write([]byte("mancar private tunnel access v1"))
-	return &Keeper{key: m.Sum(nil), secure: secure, now: time.Now, used: map[string]time.Time{}}
+	return &Keeper{key: m.Sum(nil), secure: secure, now: time.Now, used: map[string]time.Time{}, revoked: map[string]time.Time{}}
 }
 
 // SetClock replaces the clock (tests).
@@ -126,6 +127,9 @@ func (k *Keeper) Redeem(ticket, host string) (string, bool) {
 	if !ok || c.Nonce == "" {
 		return "", false
 	}
+	if k.revokedTicket(c) {
+		return "", false
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	now := k.now()
@@ -163,12 +167,46 @@ func (k *Keeper) SetCookie(w http.ResponseWriter, host, userID string) {
 	})
 }
 
+// Revoke voids every access cookie of the account issued until now: the
+// dashboard calls it when the account is disabled or deleted or its
+// password changes, so tunnel access ends with its sessions. (It is kept in
+// memory: after a gateway restart such cookies run out within CookieTTL.)
+func (k *Keeper) Revoke(userID string) {
+	if k == nil || userID == "" {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	now := k.now()
+	for id, at := range k.revoked {
+		if now.Sub(at) > CookieTTL { // every cookie it voided has expired
+			delete(k.revoked, id)
+		}
+	}
+	k.revoked[userID] = now
+}
+
+func (k *Keeper) revokedTicket(c claims) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	at, ok := k.revoked[c.User]
+	return ok && !time.Unix(c.Exp, 0).Add(-TicketTTL).After(at)
+}
+
+func (k *Keeper) revokedAfter(c claims) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	at, ok := k.revoked[c.User]
+	issued := time.Unix(c.Exp, 0).Add(-CookieTTL)
+	return ok && !issued.After(at)
+}
+
 // Allowed reports whether r carries a valid access cookie for host whose
 // account may open it (mayOpen: the owner, or someone the owner allowed).
 func (k *Keeper) Allowed(r *http.Request, host string, mayOpen func(userID string) bool) bool {
 	for _, c := range r.Cookies() {
 		if c.Name == k.CookieName() {
-			if got, ok := k.parse(c.Value, kindCookie, host); ok && mayOpen(got.User) {
+			if got, ok := k.parse(c.Value, kindCookie, host); ok && mayOpen(got.User) && !k.revokedAfter(got) {
 				return true
 			}
 		}

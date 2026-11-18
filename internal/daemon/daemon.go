@@ -403,10 +403,8 @@ func cmdAdmin(ctx context.Context, e Env, args []string) int {
 			return 1
 		}
 		defer st.Close()
-		// The dashboard tables may be newer than the running gateway.
-		if err := st.Migrate(ctx, migrations.FS); err != nil {
-			fmt.Fprintf(e.Stderr, "mancard: migration failed: %v\n", err)
-			return 1
+		if code := ensureSchema(ctx, e, st); code != 0 {
+			return code
 		}
 		switch sub {
 		case "set":
@@ -416,6 +414,11 @@ func cmdAdmin(ctx context.Context, e Env, args []string) int {
 				return 1
 			}
 			created, err := st.SetAdmin(ctx, *user, hash)
+			if errors.Is(err, postgres.ErrHasEmail) {
+				fmt.Fprintf(e.Stderr, "mancard: %q already exists with an email address (it may have been made by web sign up), so it was not changed.\n"+
+					"Check it with: mancard user list\nIf it is yours: mancard user role %s admin  and  mancard user password %s\n", *user, *user, *user)
+				return 1
+			}
 			if err != nil {
 				fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
 				return 1

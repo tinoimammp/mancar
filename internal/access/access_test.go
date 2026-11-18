@@ -105,3 +105,33 @@ func TestSafeNext(t *testing.T) {
 		t.Errorf("TicketURL = %s", u)
 	}
 }
+
+func TestRevokeEndsCookiesAndTickets(t *testing.T) {
+	k := access.New("secret", true)
+	now := time.Now()
+	k.SetClock(func() time.Time { return now })
+	c := cookieFrom(t, k, "app.example.com", "u1")
+	ticket := k.Ticket("app.example.com", "u1")
+	other := cookieFrom(t, k, "app.example.com", "u2")
+	now = now.Add(2 * time.Second)
+	k.Revoke("u1") // u1 disabled, deleted, or a new password
+	req := func(c *http.Cookie) *http.Request {
+		r := httptest.NewRequest("GET", "https://app.example.com/", nil)
+		r.AddCookie(c)
+		return r
+	}
+	all := func(string) bool { return true }
+	if k.Allowed(req(c), "app.example.com", all) {
+		t.Error("a cookie issued before Revoke still works")
+	}
+	if _, ok := k.Redeem(ticket, "app.example.com"); ok {
+		t.Error("a ticket issued before Revoke still works")
+	}
+	if !k.Allowed(req(other), "app.example.com", all) {
+		t.Error("another account's cookie stopped working")
+	}
+	now = now.Add(2 * time.Second) // signed in again afterwards
+	if !k.Allowed(req(cookieFrom(t, k, "app.example.com", "u1")), "app.example.com", all) {
+		t.Error("a cookie issued after Revoke is refused")
+	}
+}
