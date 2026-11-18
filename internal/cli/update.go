@@ -20,8 +20,11 @@ import (
 	"github.com/tinoimammp/mancar/internal/version"
 )
 
-// DefaultReleasesURL is where "mancar update" looks for the latest release.
-const DefaultReleasesURL = "https://api.github.com/repos/tinoimammp/mancar/releases/latest"
+// DefaultReleasesURL is the release page "mancar update" reads. It uses
+// plain github.com downloads, never api.github.com: the API allows only 60
+// requests an hour per address without a login, which a shared network
+// (an office, a campus) runs out of.
+const DefaultReleasesURL = "https://github.com/tinoimammp/mancar/releases"
 
 // updateCheckEvery is how often a running tunnel looks for a new release.
 const updateCheckEvery = 24 * time.Hour
@@ -30,9 +33,13 @@ const updateCheckEvery = 24 * time.Hour
 const maxBinaryBytes = 200 << 20
 
 type release struct {
-	Tag    string            // e.g. v0.3.0
-	Assets map[string]string // file name -> download URL
+	Tag  string            // e.g. v0.3.0
+	Sums map[string]string // file name -> SHA-256 (hex), from SHA256SUMS
+	base string            // ReleasesURL
 }
+
+// URL is where a file of this release is downloaded from.
+func (r *release) URL(name string) string { return r.base + "/download/" + r.Tag + "/" + name }
 
 func (e Env) httpClient() *http.Client {
 	if e.HTTPClient != nil {
@@ -41,42 +48,61 @@ func (e Env) httpClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second}
 }
 
+// latestRelease reads SHA256SUMS of the latest release
+// (ReleasesURL/latest/download/SHA256SUMS). It names every file with the
+// version ("mancar-v0.5.0-linux-amd64"), so one small download gives both
+// the latest version and the checksums.
 func (e Env) latestRelease(ctx context.Context) (*release, error) {
 	if e.ReleasesURL == "" {
 		return nil, errors.New("no release source configured")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.ReleasesURL, nil)
+	base := strings.TrimSuffix(e.ReleasesURL, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/latest/download/SHA256SUMS", nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "mancar/"+version.Version)
 	resp, err := e.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("checking for updates: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	switch {
+	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests:
+		return nil, errors.New("checking for updates: GitHub is limiting requests from your network; try again in a few minutes")
+	case resp.StatusCode == http.StatusNotFound:
+		return nil, errors.New("checking for updates: no release found (or it has no SHA256SUMS)")
+	case resp.StatusCode != http.StatusOK:
 		return nil, fmt.Errorf("checking for updates: the release server answered %s", resp.Status)
 	}
-	var body struct {
-		TagName string `json:"tag_name"`
-		Assets  []struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
-		} `json:"assets"`
+	rel := &release{Sums: map[string]string{}, base: base}
+	sc := bufio.NewScanner(io.LimitReader(resp.Body, 1<<20))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) != 2 || len(f[0]) != 64 {
+			continue
+		}
+		name := strings.TrimPrefix(f[1], "*")
+		rel.Sums[name] = strings.ToLower(f[0])
+		// mancar-<tag>-<os>-<arch>: the tag may itself contain "-" (v1.0.0-rc1)
+		if rest, ok := strings.CutPrefix(name, "mancar-"); ok && rel.Tag == "" {
+			if parts := strings.Split(rest, "-"); len(parts) >= 3 {
+				if tag := strings.Join(parts[:len(parts)-2], "-"); validTag(tag) {
+					rel.Tag = tag
+				}
+			}
+		}
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
-		return nil, fmt.Errorf("checking for updates: unreadable answer: %w", err)
-	}
-	if _, ok := parseVersion(body.TagName); !ok {
-		return nil, fmt.Errorf("checking for updates: unexpected release tag %q", body.TagName)
-	}
-	rel := &release{Tag: body.TagName, Assets: map[string]string{}}
-	for _, a := range body.Assets {
-		rel.Assets[a.Name] = a.URL
+	if rel.Tag == "" {
+		return nil, errors.New("checking for updates: the latest release lists no mancar builds")
 	}
 	return rel, nil
+}
+
+// validTag is a release tag that is safe in a URL path: v1.2.3[-x.y].
+func validTag(tag string) bool {
+	_, ok := parseVersion(tag)
+	return ok && strings.Trim(tag, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") == ""
 }
 
 // parseVersion reads "v1.2.3" (a "-suffix" marks a pre-release).
@@ -169,17 +195,11 @@ func cmdUpdate(ctx context.Context, e Env, args []string) int {
 	}
 
 	name := e.assetName(rel.Tag)
-	binURL, sumsURL := rel.Assets[name], rel.Assets["SHA256SUMS"]
-	if binURL == "" {
-		return fail(e, 1, "release %s has no build for %s/%s (%s)", rel.Tag, e.goos(), e.goarch(), name)
+	want := rel.Sums[name]
+	if want == "" {
+		return fail(e, 1, "release %s has no verified build for %s/%s (%s)", rel.Tag, e.goos(), e.goarch(), name)
 	}
-	if sumsURL == "" {
-		return fail(e, 1, "release %s has no SHA256SUMS; refusing to install an unverified binary", rel.Tag)
-	}
-	want, err := e.expectedSum(ctx, sumsURL, name)
-	if err != nil {
-		return fail(e, 1, "%v", err)
-	}
+	binURL := rel.URL(name)
 
 	exe, err := e.executable()
 	if err != nil {
@@ -233,23 +253,6 @@ func (e Env) get(ctx context.Context, url string) (*http.Response, error) {
 		return nil, fmt.Errorf("download of %s failed: %s", url, resp.Status)
 	}
 	return resp, nil
-}
-
-// expectedSum finds name in a SHA256SUMS file ("<hex>  <name>" lines).
-func (e Env) expectedSum(ctx context.Context, url, name string) (string, error) {
-	resp, err := e.get(ctx, url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	sc := bufio.NewScanner(io.LimitReader(resp.Body, 1<<20))
-	for sc.Scan() {
-		f := strings.Fields(sc.Text())
-		if len(f) == 2 && strings.TrimPrefix(f[1], "*") == name && len(f[0]) == 64 {
-			return strings.ToLower(f[0]), nil
-		}
-	}
-	return "", fmt.Errorf("SHA256SUMS has no entry for %s; refusing to install an unverified binary", name)
 }
 
 // download writes url to a temporary file in dir and checks its SHA-256.

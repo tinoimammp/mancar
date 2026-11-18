@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -42,6 +41,8 @@ func TestNewer(t *testing.T) {
 	}
 }
 
+// fakeReleases serves a release the way github.com does: latest/download
+// redirects to download/<tag>/<file>.
 type fakeReleases struct {
 	srv      *httptest.Server
 	hits     atomic.Int64
@@ -49,6 +50,7 @@ type fakeReleases struct {
 	binary   []byte
 	sums     string // overrides the generated SHA256SUMS when set
 	noSums   bool
+	status   int    // answers every request with this status when set
 	assetFor string // os-arch the release has a build for
 }
 
@@ -56,23 +58,28 @@ func newFakeReleases(t *testing.T, tag string, binary []byte) *fakeReleases {
 	f := &fakeReleases{tag: tag, binary: binary, assetFor: "linux-amd64"}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := fmt.Sprintf("mancar-%s-%s", f.tag, f.assetFor)
+		if f.status != 0 {
+			w.WriteHeader(f.status)
+			return
+		}
 		switch r.URL.Path {
-		case "/latest":
+		case "/latest/download/SHA256SUMS":
 			f.hits.Add(1)
-			assets := []map[string]string{{"name": name, "browser_download_url": f.srv.URL + "/bin"}}
-			if !f.noSums {
-				assets = append(assets, map[string]string{"name": "SHA256SUMS", "browser_download_url": f.srv.URL + "/sums"})
-			}
-			json.NewEncoder(w).Encode(map[string]any{"tag_name": f.tag, "assets": assets})
-		case "/bin":
+			http.Redirect(w, r, "/download/"+f.tag+"/SHA256SUMS", http.StatusFound)
+		case "/download/" + f.tag + "/" + name:
 			w.Write(f.binary)
-		case "/sums":
+		case "/download/" + f.tag + "/SHA256SUMS":
+			if f.noSums {
+				http.NotFound(w, r)
+				return
+			}
 			if f.sums != "" {
 				fmt.Fprint(w, f.sums)
 				return
 			}
 			sum := sha256.Sum256(f.binary)
-			fmt.Fprintf(w, "%s  mancar-%s-darwin-arm64\n%s  %s\n", strings.Repeat("0", 64), f.tag, hex.EncodeToString(sum[:]), name)
+			fmt.Fprintf(w, "%s  mancar-%s-darwin-arm64\n%s  %s\n%s  mancard-%s-linux-amd64\n",
+				strings.Repeat("0", 64), f.tag, hex.EncodeToString(sum[:]), name, strings.Repeat("1", 64), f.tag)
 		default:
 			http.NotFound(w, r)
 		}
@@ -96,7 +103,7 @@ func updateEnv(t *testing.T, f *fakeReleases) (Env, string, *bytes.Buffer, *byte
 	var out, errb bytes.Buffer
 	e := Env{
 		Stdout: &out, Stderr: &errb, StateDir: t.TempDir(), ConfigDir: t.TempDir(),
-		ReleasesURL: f.srv.URL + "/latest", GOOS: "linux", GOARCH: "amd64",
+		ReleasesURL: f.srv.URL, GOOS: "linux", GOARCH: "amd64",
 		Executable: func() (string, error) { return exe, nil },
 	}
 	return e.withDefaults(), exe, &out, &errb
@@ -128,7 +135,8 @@ func TestUpdateRefusesBadChecksumOrMissingSums(t *testing.T) {
 	setVersion(t, "v0.2.0")
 	for name, mutate := range map[string]func(*fakeReleases){
 		"wrong checksum": func(f *fakeReleases) { f.sums = strings.Repeat("a", 64) + "  mancar-v0.3.0-linux-amd64\n" },
-		"no entry":       func(f *fakeReleases) { f.sums = strings.Repeat("a", 64) + "  something-else\n" },
+		"no entry":       func(f *fakeReleases) { f.sums = strings.Repeat("a", 64) + "  mancar-v0.3.0-darwin-arm64\n" },
+		"no mancar":      func(f *fakeReleases) { f.sums = strings.Repeat("a", 64) + "  something-else\n" },
 		"no SHA256SUMS":  func(f *fakeReleases) { f.noSums = true },
 		"no build":       func(f *fakeReleases) { f.assetFor = "plan9-mips" },
 	} {
@@ -146,6 +154,31 @@ func TestUpdateRefusesBadChecksumOrMissingSums(t *testing.T) {
 				t.Errorf("temporary files left behind: %v", left)
 			}
 		})
+	}
+}
+
+func TestUpdateExplainsRateLimits(t *testing.T) {
+	setVersion(t, "v0.2.0")
+	f := newFakeReleases(t, "v0.3.0", []byte("x"))
+	f.status = http.StatusForbidden
+	e, _, _, errb := updateEnv(t, f)
+	if code := Main(context.Background(), []string{"update"}, e); code != 1 || !strings.Contains(errb.String(), "GitHub is limiting requests") {
+		t.Errorf("exit %d: %q", code, errb)
+	}
+}
+
+func TestReleaseTagFromSums(t *testing.T) {
+	f := newFakeReleases(t, "v1.0.0-rc1", []byte("x"))
+	e, _, _, _ := updateEnv(t, f)
+	rel, err := e.latestRelease(context.Background())
+	if err != nil || rel.Tag != "v1.0.0-rc1" || rel.URL("a") != f.srv.URL+"/download/v1.0.0-rc1/a" {
+		t.Fatalf("%+v %v", rel, err)
+	}
+	// every platform picks its own file
+	for goos, want := range map[string]string{"darwin": "mancar-v1.0.0-rc1-darwin-arm64", "windows": "mancar-v1.0.0-rc1-windows-arm64.exe"} {
+		if got := (Env{GOOS: goos, GOARCH: "arm64"}).assetName(rel.Tag); got != want {
+			t.Errorf("%s: %s", goos, got)
+		}
 	}
 }
 
