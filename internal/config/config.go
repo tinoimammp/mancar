@@ -42,6 +42,7 @@ type Config struct {
 
 	MaxTunnelsPerAgent    int
 	MaxAgentsPerUser      int
+	MaxTCPTunnelsPerUser  int
 	MaxConnsPerTunnel     int
 	MaxRequestBodyBytes   int64
 	AuthFailureLimit      int // failed agent logins per client address per minute; 0 = unlimited
@@ -176,7 +177,10 @@ func Load(getenv func(string) string) (*Config, error) {
 
 	c.JWTSecret = getenv("JWT_SECRET")
 	encKey := strings.TrimSpace(getenv("ENCRYPTION_KEY"))
-	if c.Env == "production" || c.JWTSecret != "" {
+	// With PostgreSQL the secret signs dashboard sessions and private tunnel
+	// access, so it is required in every environment (an empty key would
+	// let anyone forge a session).
+	if c.Env == "production" || c.Storage == "postgres" || c.JWTSecret != "" {
 		if len(c.JWTSecret) < 32 || placeholders[strings.ToLower(c.JWTSecret)] {
 			bad("JWT_SECRET is required and must be at least 32 characters (generate with: openssl rand -hex 32)")
 		}
@@ -209,6 +213,7 @@ func Load(getenv func(string) string) (*Config, error) {
 
 	c.MaxTunnelsPerAgent = getInt("MAX_TUNNELS_PER_AGENT", 10, 1)
 	c.MaxAgentsPerUser = getInt("MAX_AGENTS_PER_USER", 10, 1)
+	c.MaxTCPTunnelsPerUser = getInt("MAX_TCP_TUNNELS_PER_USER", 10, 1)
 	c.MaxConnsPerTunnel = getInt("MAX_CONNECTIONS_PER_TUNNEL", 256, 1)
 	c.MaxRequestBodyBytes = int64(getInt("MAX_REQUEST_BODY_BYTES", 100<<20, 0))
 	c.AuthFailureLimit = getInt("AUTH_FAILURE_LIMIT_PER_MINUTE", 10, 0)

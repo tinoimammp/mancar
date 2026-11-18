@@ -88,7 +88,7 @@ func TestInspectorCapturesEncryptedExchanges(t *testing.T) {
 
 	// A replay goes through the same router and is marked as such; a client
 	// cannot fake the mark with a header.
-	req := httptest.NewRequest("GET", "http://"+tun.Hostname+"/again", nil).WithContext(router.WithReplay(context.Background()))
+	req := httptest.NewRequest("GET", "http://"+tun.Hostname+"/again", nil).WithContext(router.WithReplay(context.Background(), "alice"))
 	req.RemoteAddr = "127.0.0.1:1"
 	e.srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
 	e.do("GET", tun.Hostname, "/fake", nil, map[string]string{"X-Mancar-Replay": "1"})

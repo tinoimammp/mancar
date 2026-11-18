@@ -84,3 +84,31 @@ func TestServiceRandomRetriesOnCollision(t *testing.T) {
 		seen[l.Hostname] = true
 	}
 }
+
+// slowRegistry writes the claim but answers as if the database timed out.
+type slowRegistry struct{ *MemoryRegistry }
+
+func (r slowRegistry) Claim(ctx context.Context, c Claim) (string, error) {
+	r.MemoryRegistry.Claim(ctx, c)
+	return "", context.DeadlineExceeded
+}
+
+func TestTimedOutClaimDoesNotStickTheName(t *testing.T) {
+	reg := NewMemoryRegistry()
+	svc := NewService(slowRegistry{reg}, ServiceOptions{BaseDomain: "example.com"})
+	if _, err := svc.Acquire(context.Background(), "u1", "shop", "t1"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Acquire: %v", err)
+	}
+	// the owner can have the name again once the background release ran
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := reg.Claim(context.Background(), Claim{Hostname: "shop.example.com", OwnerID: "u1", Kind: KindCustom, TunnelID: "t2"})
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the name stayed active: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

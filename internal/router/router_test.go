@@ -380,12 +380,23 @@ func TestPrivateTunnelShowsTheRestrictedPage(t *testing.T) {
 func TestReplayIntoAPrivateTunnelIsNotStopped(t *testing.T) {
 	h := newHarness(t, func(o *router.Options) { o.Access = access.New("secret", true) })
 	h.tunnels.hosts["app.mydomain.com"].Private = true
-	req := httptest.NewRequest("POST", "https://app.mydomain.com/hook", nil)
-	req.Host = "app.mydomain.com"
-	rec := httptest.NewRecorder()
-	h.rt.ServeHTTP(rec, req.WithContext(router.WithReplay(req.Context())))
-	if rec.Code != http.StatusBadGateway { // forwarded (the fake tunnel is gone)
-		t.Errorf("replay: %d %s", rec.Code, rec.Body)
+	h.tunnels.hosts["app.mydomain.com"].UserID = "owner"
+	replay := func(owner string) int {
+		req := httptest.NewRequest("POST", "https://app.mydomain.com/hook", nil)
+		req.Host = "app.mydomain.com"
+		rec := httptest.NewRecorder()
+		h.rt.ServeHTTP(rec, req.WithContext(router.WithReplay(req.Context(), owner)))
+		return rec.Code
+	}
+	if code := replay("owner"); code != http.StatusBadGateway { // forwarded (the fake tunnel is gone)
+		t.Errorf("owner's replay: %d", code)
+	}
+	// a capture recorded when the name belonged to someone else
+	if code := replay("previous-owner"); code != http.StatusConflict {
+		t.Errorf("replay into another account's tunnel: %d", code)
+	}
+	if _, ids := h.tunnels.snapshot(); len(ids) != 1 {
+		t.Errorf("tunnel dials: %v", ids)
 	}
 }
 

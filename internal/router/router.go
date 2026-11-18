@@ -51,10 +51,11 @@ type Usage interface {
 
 type replayKey struct{}
 
-// WithReplay marks a request as a dashboard replay (shown as such in the
+// WithReplay marks a request as a dashboard replay of a capture recorded
+// on a tunnel of account ownerID (shown as a replay in the
 // inspector). It is a context value, so public clients cannot set it.
-func WithReplay(ctx context.Context) context.Context {
-	return context.WithValue(ctx, replayKey{}, true)
+func WithReplay(ctx context.Context, ownerID string) context.Context {
+	return context.WithValue(ctx, replayKey{}, ownerID)
 }
 
 // Options configures a Router.
@@ -97,6 +98,10 @@ type reqInfo struct {
 	tunnel *gateway.Tunnel
 	client netutil.ClientInfo
 }
+
+// spoofableIPHeaders name the client address in other proxies' dialects;
+// a visitor could set them to anything.
+var spoofableIPHeaders = []string{"X-Real-IP", "True-Client-IP", "CF-Connecting-IP", "X-Client-IP", "X-Cluster-Client-IP", "Fastly-Client-IP"}
 
 // HeaderError tells clients which platform error produced a response.
 const HeaderError = "X-Mancar-Error"
@@ -143,6 +148,13 @@ func New(opts Options) *Router {
 			pr.Out.Header.Set("X-Forwarded-For", info.client.IP)
 			pr.Out.Header.Set("X-Forwarded-Proto", info.client.Proto)
 			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
+			// Other client-IP headers apps commonly trust would otherwise
+			// pass through as the visitor sent them: drop them, and give
+			// X-Real-IP the address we derived.
+			for _, h := range spoofableIPHeaders {
+				pr.Out.Header.Del(h)
+			}
+			pr.Out.Header.Set("X-Real-IP", info.client.IP)
 		},
 		ErrorHandler: rt.proxyError,
 		ErrorLog:     slog.NewLogLogger(opts.Logger.Handler(), slog.LevelDebug),
@@ -166,9 +178,15 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("Tunnel %s not found. The agent may be offline.", host))
 		return
 	}
-	// A dashboard replay was authorised by the dashboard (and cannot come
-	// from outside: it is a context value), so it skips the access check.
-	replay, _ := r.Context().Value(replayKey{}).(bool)
+	// A dashboard replay (a context value: it cannot come from outside) goes
+	// only to a tunnel of the account that recorded the capture: the name
+	// may belong to someone else by now. Such a replay skips the private
+	// access check, since the owner replays into their own tunnel.
+	replayOwner, replay := r.Context().Value(replayKey{}).(string)
+	if replay && (replayOwner == "" || replayOwner != t.UserID) {
+		writeError(w, http.StatusConflict, "tunnel_changed", "This hostname now belongs to another tunnel; the request was not replayed.")
+		return
+	}
 	if t.Private && !replay && !rt.letIn(w, r, host, t) {
 		return
 	}

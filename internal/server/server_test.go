@@ -395,7 +395,7 @@ func TestSystemHealth_ExternalClientsOnlyGetTheVerdict(t *testing.T) {
 	check("public client, database down", get(down, "mydomain.com", "/api/v1/system/health"), http.StatusServiceUnavailable, "degraded")
 }
 
-func TestSystemHealth_ClientIdentityComesFromTheTrustedProxyHeader(t *testing.T) {
+func TestSystemHealth_DetailsOnlyForDirectInternalRequests(t *testing.T) {
 	h := newServer(t, nil).Handler()
 	hit := func(remote, xff string) map[string]any {
 		req := httptest.NewRequest("GET", "http://mydomain.com/api/v1/system/health", nil)
@@ -415,9 +415,16 @@ func TestSystemHealth_ClientIdentityComesFromTheTrustedProxyHeader(t *testing.T)
 	if got := hit("172.18.0.5:4000", "198.51.100.7"); len(got) != 1 {
 		t.Errorf("public client behind the edge saw details: %v", got)
 	}
-	// ...while an operator connecting from the private network sees details.
-	if got := hit("172.18.0.5:4000", "10.0.0.8"); got["version"] == nil {
-		t.Errorf("internal client behind the edge saw no details: %v", got)
+	// ...and so does anything forwarded, even from a private address: an
+	// address mis-attributed on the way (an IPv6 client behind Docker's
+	// proxy shows up as 172.x) must not unlock the details.
+	if got := hit("172.18.0.5:4000", "10.0.0.8"); len(got) != 1 {
+		t.Errorf("a forwarded request saw details: %v", got)
+	}
+	// A direct request from inside the deployment (wget in the edge
+	// container) sees them.
+	if got := hit("172.18.0.5:4000", ""); got["version"] == nil {
+		t.Errorf("direct internal request saw no details: %v", got)
 	}
 	// A public peer cannot claim to be internal by sending a header.
 	if got := hit("198.51.100.7:4000", "10.0.0.8"); len(got) != 1 {

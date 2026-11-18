@@ -189,7 +189,7 @@ func (d *Dashboard) replayRequest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "not_replayable", why)
 		return
 	}
-	ctx, cancel := context.WithTimeout(router.WithReplay(context.WithoutCancel(r.Context())), 60*time.Second)
+	ctx, cancel := context.WithTimeout(router.WithReplay(context.WithoutCancel(r.Context()), rec.UserID), 60*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, rec.Method, "http://"+rec.Hostname+rec.URI, bytes.NewReader(rec.ReqBody))
 	if err != nil {

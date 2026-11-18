@@ -471,3 +471,16 @@ func TestLoad_SMTPURLIsValidated(t *testing.T) {
 		t.Error("SMTP_URL alone must not open sign up")
 	}
 }
+
+// Development with PostgreSQL still signs real sessions: no empty secret.
+func TestLoad_PostgresNeedsJWTSecretInDevelopment(t *testing.T) {
+	e := devEnv()
+	e["STORAGE"] = "postgres"
+	e["POSTGRES_PASSWORD"] = "pw"
+	if ce := loadErr(t, e); !hasProblem(ce, "JWT_SECRET") {
+		t.Errorf("problems: %v", ce.Problems)
+	}
+	e["JWT_SECRET"] = validJWT
+	mustLoad(t, e)
+	mustLoad(t, devEnv()) // memory storage needs none
+}

@@ -60,6 +60,9 @@ type Options struct {
 
 	MaxTunnelsPerSession int
 	MaxSessionsPerUser   int
+	// MaxTCPTunnelsPerUser bounds TCP tunnels per account across its agents,
+	// so one account cannot take the whole port range (default 10).
+	MaxTCPTunnelsPerUser int
 	MaxConnsPerTunnel    int
 	KeepAliveInterval    time.Duration
 	Logger               *slog.Logger
@@ -86,12 +89,22 @@ type Options struct {
 // address with no account.
 var ErrUnknownUser = errors.New("no account")
 
+// controlBurst control messages per controlWindow are allowed per agent:
+// far above what reconnecting with many tunnels needs.
+const (
+	controlBurst  = 120
+	controlWindow = 10 * time.Second
+)
+
 // MaxAllow bounds the accounts one private tunnel can be shared with.
 const MaxAllow = 20
 
 func (o *Options) defaults() {
 	if o.MaxTunnelsPerSession <= 0 {
 		o.MaxTunnelsPerSession = 10
+	}
+	if o.MaxTCPTunnelsPerUser <= 0 {
+		o.MaxTCPTunnelsPerUser = 10
 	}
 	if o.MaxSessionsPerUser <= 0 {
 		o.MaxSessionsPerUser = 10
@@ -500,7 +513,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mux, err := yamux.Server(&netutil.BufferedConn{Conn: conn, R: brw.Reader}, protocol.YamuxConfig(h.opts.KeepAliveInterval))
+	// The agent opens one stream only (control); a small backlog bounds what
+	// a misbehaving agent can park here (each stream buffers up to 256 KiB).
+	ycfg := protocol.YamuxConfig(h.opts.KeepAliveInterval)
+	ycfg.AcceptBacklog = 4
+	mux, err := yamux.Server(&netutil.BufferedConn{Conn: conn, R: brw.Reader}, ycfg)
 	if err != nil {
 		conn.Close()
 		return
@@ -559,10 +576,35 @@ func (h *Hub) run(s *session) {
 		return
 	}
 
+	// Any further stream from the agent is closed at once: nothing in the
+	// protocol uses them, and unaccepted streams would hold memory.
+	go func() {
+		for {
+			st, err := s.mux.Accept()
+			if err != nil {
+				return
+			}
+			st.Close()
+		}
+	}()
+
 	br := protocol.NewControlReader(ctrl)
+	var window time.Time
+	var inWindow int
 	for {
 		msg, err := protocol.ReadMessage(br)
 		if err != nil {
+			return
+		}
+		// Each register may cost several database writes: an agent sending
+		// more than controlBurst messages per controlWindow is dropped.
+		if now := time.Now(); now.Sub(window) > controlWindow {
+			window, inWindow = now, 0
+		}
+		if inWindow++; inWindow > controlBurst {
+			_ = ctrl.SetWriteDeadline(time.Now().Add(time.Second))
+			_ = protocol.WriteJSONLine(ctrl, errMsg(protocol.CodeLimitExceeded, "too many control messages; slow down"))
+			h.log.Warn("agent sent too many control messages; disconnecting", "session", s.id, "user", s.userID)
 			return
 		}
 		reply := h.handle(s, msg)
@@ -701,6 +743,21 @@ func (h *Hub) register(s *session, reg *protocol.Register) *protocol.Message {
 	case protocol.ProtoTCP:
 		if h.opts.TCPPortMin == 0 {
 			return errMsg(protocol.CodeUnsupported, "TCP tunnels are disabled on this server")
+		}
+		h.mu.RLock()
+		n := 0
+		for _, other := range h.sessions {
+			if other.userID == s.userID {
+				for _, ot := range other.tunnels {
+					if ot.Proto == protocol.ProtoTCP {
+						n++
+					}
+				}
+			}
+		}
+		h.mu.RUnlock()
+		if n >= h.opts.MaxTCPTunnelsPerUser {
+			return errMsg(protocol.CodeLimitExceeded, "at most %d TCP tunnels per account", h.opts.MaxTCPTunnelsPerUser)
 		}
 		ln, port, err := h.listenTCP()
 		if err != nil {

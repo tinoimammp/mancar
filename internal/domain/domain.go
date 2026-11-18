@@ -154,6 +154,7 @@ func (s *Service) Acquire(ctx context.Context, ownerID, label, tunnelID string) 
 		host := label + "." + s.opts.BaseDomain
 		kind, err := s.reg.Claim(ctx, Claim{Hostname: host, OwnerID: ownerID, Kind: KindCustom, TunnelID: tunnelID})
 		if err != nil {
+			s.undoClaim(err, host, tunnelID, KindCustom)
 			return Lease{}, err
 		}
 		return Lease{Hostname: host, Kind: kind}, nil
@@ -173,11 +174,28 @@ func (s *Service) Acquire(ctx context.Context, ownerID, label, tunnelID string) 
 			continue
 		}
 		if err != nil {
+			s.undoClaim(err, host, tunnelID, KindRandom)
 			return Lease{}, err
 		}
 		return Lease{Hostname: host, Kind: kind}, nil
 	}
 	return Lease{}, ErrExhausted
+}
+
+// undoClaim releases host for tunnelID after an unexpected Claim error (a
+// timeout, a lost connection): the claim may have been committed although
+// the answer never arrived, which would leave the name marked active until
+// the next restart. Release only touches a row held by tunnelID, so this is
+// a no-op when nothing was written.
+func (s *Service) undoClaim(err error, host, tunnelID, kind string) {
+	if errors.Is(err, ErrHostnameTaken) || errors.Is(err, ErrLimitReached) || errors.Is(err, ErrInvalidLabel) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = s.reg.Release(ctx, host, tunnelID, s.hold(kind))
+	}()
 }
 
 // Release returns a lease, keeping the name held for its owner for a while.

@@ -78,10 +78,10 @@ func New(d Deps) *Server {
 	hub := gateway.NewHub(d.Auth, domains, gateway.Options{
 		PublicURL: cfg.PublicURL, TCPHost: cfg.BaseDomain, TCPBindHost: d.TCPBindHost,
 		TCPPortMin: cfg.TCPPortMin, TCPPortMax: cfg.TCPPortMax,
-		MaxTunnelsPerSession: cfg.MaxTunnelsPerAgent, MaxSessionsPerUser: cfg.MaxAgentsPerUser,
+		MaxTunnelsPerSession: cfg.MaxTunnelsPerAgent, MaxSessionsPerUser: cfg.MaxAgentsPerUser, MaxTCPTunnelsPerUser: cfg.MaxTCPTunnelsPerUser,
 		MaxConnsPerTunnel: cfg.MaxConnsPerTunnel, KeepAliveInterval: d.KeepAlive, Logger: d.Logger,
 		TrustedProxies: cfg.TrustedProxies, AuthFailureLimit: authFailureLimit(cfg), AuthFailureWindow: time.Minute,
-		PrivateTunnels: d.Admin != nil, ResolveLogins: resolveLogins(d.Admin),
+		PrivateTunnels: d.Admin != nil, ResolveLogins: resolveLogins(adminFinder(d.Admin)),
 	})
 	// Private tunnels sign visitors in through the dashboard, so they need
 	// accounts (PostgreSQL).
@@ -119,8 +119,14 @@ func New(d Deps) *Server {
 		// Version and counters help an attacker fingerprint the gateway, so
 		// only internal clients (the trusted-proxy ranges, seen through the
 		// real client address) get them; everybody else gets the verdict.
-		client := netutil.ClientFromRequest(r, cfg.TrustedProxies)
-		if netutil.InPrefixes(cfg.TrustedProxies, client.IP) {
+		//
+		// Only a direct request from inside counts: the peer is in the
+		// trusted ranges and nothing forwarded it. Everything from the
+		// internet arrives through the edge, which adds X-Forwarded-For,
+		// so a mis-attributed address (an IPv6 client behind Docker's
+		// proxy, a host on the LAN) cannot get the details by accident.
+		peer, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if r.Header.Get("X-Forwarded-For") == "" && netutil.InPrefixes(cfg.TrustedProxies, peer) {
 			json.NewEncoder(w).Encode(h)
 			return
 		}
@@ -296,9 +302,9 @@ func authFailureLimit(cfg *config.Config) int {
 }
 
 // resolveLogins turns the usernames or email addresses of "mancar http
-// --allow" into accounts (ID -> username). Without accounts (no dashboard)
-// sharing is off.
-func resolveLogins(st dashboard.Store) func(context.Context, []string) (map[string]string, error) {
+// --allow" into active accounts with a confirmed email (ID -> username).
+// Without accounts (no dashboard) sharing is off.
+func resolveLogins(st accountFinder) func(context.Context, []string) (map[string]string, error) {
 	if st == nil {
 		return nil
 	}
@@ -308,7 +314,9 @@ func resolveLogins(st dashboard.Store) func(context.Context, []string) (map[stri
 		for _, l := range logins {
 			a, err := st.AccountByLogin(ctx, l)
 			switch {
-			case errors.Is(err, postgres.ErrNotFound):
+			// a sign up that never confirmed its email may not be who the
+			// address says; a disabled account cannot sign in anyway
+			case errors.Is(err, postgres.ErrNotFound), err == nil && (!a.Verified() || a.DisabledAt != nil):
 				unknown = append(unknown, l)
 			case err != nil:
 				return nil, err
@@ -321,4 +329,17 @@ func resolveLogins(st dashboard.Store) func(context.Context, []string) (map[stri
 		}
 		return out, nil
 	}
+}
+
+// accountFinder is the part of the account store --allow needs.
+type accountFinder interface {
+	AccountByLogin(ctx context.Context, login string) (postgres.Account, error)
+}
+
+// adminFinder keeps a nil store nil (an interface holding a nil store is not).
+func adminFinder(st dashboard.Store) accountFinder {
+	if st == nil {
+		return nil
+	}
+	return st
 }

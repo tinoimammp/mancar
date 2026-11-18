@@ -96,6 +96,19 @@ func TestHTTPForwardingWithRandomHostname(t *testing.T) {
 	}
 }
 
+func TestClientIPHeadersCannotBeSpoofed(t *testing.T) {
+	e := newEnv(t, nil)
+	tun := e.startAgent(e.token("alice"), "", httpSpec(echoServer(t, "one").URL, "")).waitOnline(t)[0].Registered
+	_, body := e.do("GET", tun.Hostname, "/", nil, map[string]string{"X-Real-IP": "6.6.6.6", "True-Client-IP": "6.6.6.6", "CF-Connecting-IP": "6.6.6.6"})
+	var got echo
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Header.Get("X-Real-IP") != "127.0.0.1" || got.Header.Get("True-Client-IP") != "" || got.Header.Get("CF-Connecting-IP") != "" {
+		t.Errorf("client IP headers reached the app: %v", got.Header)
+	}
+}
+
 func TestForwardedHeadersFromUntrustedClientsAreIgnored(t *testing.T) {
 	e := newEnv(t, map[string]string{"TRUSTED_PROXIES": "192.0.2.0/24"})
 	backend := echoServer(t, "one")
@@ -575,4 +588,16 @@ func TestPrivateTunnelNeedsTheDashboard(t *testing.T) {
 	if code := registrationCode(err); code != protocol.CodeUnsupported {
 		t.Fatalf("registration code = %s", code)
 	}
+}
+
+// One account cannot take the whole TCP port range.
+func TestTCPTunnelsArePerAccount(t *testing.T) {
+	e := newEnv(t, map[string]string{"MAX_TCP_TUNNELS_PER_USER": "2"})
+	tcp := agent.TunnelSpec{Proto: protocol.ProtoTCP, LocalAddr: "127.0.0.1:1"}
+	err := e.startAgent(e.token("alice"), "", tcp, tcp, tcp).waitExit(t)
+	if code := registrationCode(err); code != protocol.CodeLimitExceeded {
+		t.Fatalf("third TCP tunnel: %s", code)
+	}
+	// another account still gets ports
+	e.startAgent(e.token("bob"), "", tcp).waitOnline(t)
 }
