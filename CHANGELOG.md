@@ -7,6 +7,8 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-11-18
+
 ### Added
 - **Private tunnels**: `mancar http 3000 --private` (or `config add-tunnel
   ... --private`). Visitors see a Restricted page with "Log in to continue";
@@ -15,6 +17,16 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   browser. The dashboard marks these tunnels "Private". They need the
   dashboard (PostgreSQL); a server without it, or an older one, refuses
   them instead of serving them publicly.
+- `mancar status` marks private tunnels.
+
+### Changed
+- `mancar config` refuses `--subdomain` and `--private` outside
+  `add-tunnel` instead of ignoring them.
+
+### Upgrading
+- No migration. Update the server and the clients; `--private` needs both
+  at v0.5.0 (an older client has no such flag, an older server refuses it
+  through a new client).
 
 ## [v0.4.0] - 2026-11-18
 
@@ -200,6 +212,7 @@ First release.
   rate limiting.
 - Built with Go 1.26.11.
 
+[v0.5.0]: https://github.com/tinoimammp/mancar/compare/v0.4.0...v0.5.0
 [v0.4.0]: https://github.com/tinoimammp/mancar/compare/v0.3.3...v0.4.0
 [v0.3.3]: https://github.com/tinoimammp/mancar/compare/v0.3.2...v0.3.3
 [v0.3.2]: https://github.com/tinoimammp/mancar/compare/v0.3.1...v0.3.2
