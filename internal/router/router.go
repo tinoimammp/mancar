@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tinoimammp/mancar/internal/access"
 	"github.com/tinoimammp/mancar/internal/gateway"
 	"github.com/tinoimammp/mancar/internal/inspect"
 	"github.com/tinoimammp/mancar/internal/netutil"
@@ -69,6 +70,16 @@ type Options struct {
 	Inspector Inspector
 	// Usage, when set, counts requests and bytes per hostname.
 	Usage Usage
+	// Access lets owners into private tunnels; without it private tunnels
+	// answer 403 to everyone.
+	Access *access.Keeper
+	// SignInURL is the dashboard sign in page with target
+	// ("host/path?query") as its ref: after signing in, the owner is sent
+	// back there.
+	SignInURL func(target string) string
+	// Restricted, when set, renders the page a browser without access
+	// sees (with a button to signIn); otherwise it is redirected there.
+	Restricted func(w http.ResponseWriter, host, signIn string)
 }
 
 // Router is the public HTTP entry point.
@@ -155,6 +166,12 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("Tunnel %s not found. The agent may be offline.", host))
 		return
 	}
+	// A dashboard replay was authorised by the dashboard (and cannot come
+	// from outside: it is a context value), so it skips the access check.
+	replay, _ := r.Context().Value(replayKey{}).(bool)
+	if t.Private && !replay && !rt.letIn(w, r, host, t) {
+		return
+	}
 	info := &reqInfo{tunnel: t, client: netutil.ClientFromRequest(r, rt.opts.TrustedProxies)}
 	if rt.opts.MaxBodyBytes > 0 {
 		if r.ContentLength > rt.opts.MaxBodyBytes {
@@ -172,7 +189,6 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var rec *inspect.Record
 	var reqBuf *inspect.Buffer
 	if ins := rt.opts.Inspector; ins != nil {
-		replay, _ := r.Context().Value(replayKey{}).(bool)
 		rec = &inspect.Record{
 			ID: inspect.NewID(), UserID: t.UserID, Hostname: host, TunnelID: t.ID, Time: start,
 			Method: r.Method, URI: r.URL.RequestURI(), Proto: r.Proto, Client: info.client.IP,
@@ -201,6 +217,46 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The query string is deliberately not logged: it often carries secrets.
 	rt.log.Info("request", "host", host, "method", r.Method, "path", r.URL.Path, "status", sw.status,
 		"duration_ms", dur.Milliseconds(), "client", info.client.IP, "tunnel", t.ID)
+}
+
+// letIn guards a private tunnel: it reports whether the request may go to
+// the app, and otherwise answers it (sign-in redirect, ticket redemption
+// or refusal). The access cookie never reaches the app.
+func (rt *Router) letIn(w http.ResponseWriter, r *http.Request, host string, t *gateway.Tunnel) bool {
+	k := rt.opts.Access
+	if k == nil {
+		writeError(w, http.StatusForbidden, "private_tunnel", "This tunnel is private.")
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if r.URL.Path == access.Path {
+		user, ok := k.Redeem(r.URL.Query().Get("ticket"), host)
+		if !ok || user != t.UserID {
+			writeError(w, http.StatusForbidden, "access_denied", "This sign-in link has expired or was already used. Open the address again.")
+			return false
+		}
+		k.SetCookie(w, host, user)
+		http.Redirect(w, r, access.SafeNext(r.URL.Query().Get("next")), http.StatusSeeOther)
+		return false
+	}
+	if k.Allowed(r, host, t.UserID) {
+		w.Header().Del("Cache-Control") // the app decides from here
+		k.StripCookie(r.Header)
+		return true
+	}
+	browser := (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		strings.Contains(r.Header.Get("Accept"), "text/html") && r.Header.Get("Upgrade") == ""
+	if browser && rt.opts.SignInURL != nil {
+		signIn := rt.opts.SignInURL(host + r.URL.RequestURI())
+		if rt.opts.Restricted != nil {
+			rt.opts.Restricted(w, host, signIn)
+		} else {
+			http.Redirect(w, r, signIn, http.StatusFound)
+		}
+		return false
+	}
+	writeError(w, http.StatusUnauthorized, "private_tunnel", "This tunnel is private. Open it in a browser and sign in as its owner.")
+	return false
 }
 
 func (rt *Router) proxyError(w http.ResponseWriter, r *http.Request, err error) {

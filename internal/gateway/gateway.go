@@ -73,6 +73,9 @@ type Options struct {
 	// any database lookup. 0 selects the default (10); negative disables it.
 	AuthFailureLimit  int
 	AuthFailureWindow time.Duration
+	// PrivateTunnels allows tunnels only their owner can open. It needs the
+	// dashboard (accounts) to sign visitors in.
+	PrivateTunnels bool
 }
 
 func (o *Options) defaults() {
@@ -111,6 +114,8 @@ type Tunnel struct {
 	PublicURL string
 	UserID    string
 	CreatedAt time.Time
+	// Private: only the owner may open it (checked by the router).
+	Private bool
 
 	sess  *session
 	lease domain.Lease
@@ -254,6 +259,7 @@ type TunnelInfo struct {
 	PublicURL   string    `json:"public_url"`
 	CreatedAt   time.Time `json:"created_at"`
 	ActiveConns int       `json:"active_connections"`
+	Private     bool      `json:"private,omitempty"`
 }
 
 // SessionInfo is a read-only view of a connected agent.
@@ -281,7 +287,7 @@ func (h *Hub) Sessions() []SessionInfo {
 		for _, t := range s.tunnels {
 			si.Tunnels = append(si.Tunnels, TunnelInfo{
 				ID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port,
-				PublicURL: t.PublicURL, CreatedAt: t.CreatedAt, ActiveConns: len(t.sem),
+				PublicURL: t.PublicURL, CreatedAt: t.CreatedAt, ActiveConns: len(t.sem), Private: t.Private,
 			})
 		}
 		sort.Slice(si.Tunnels, func(i, j int) bool { return si.Tunnels[i].CreatedAt.Before(si.Tunnels[j].CreatedAt) })
@@ -614,8 +620,14 @@ func (h *Hub) register(s *session, reg *protocol.Register) *protocol.Message {
 	if n >= h.opts.MaxTunnelsPerSession {
 		return errMsg(protocol.CodeLimitExceeded, "at most %d tunnels per agent", h.opts.MaxTunnelsPerSession)
 	}
+	if reg.Private && reg.Proto != protocol.ProtoHTTP {
+		return errMsg(protocol.CodeUnsupported, "only http tunnels can be private")
+	}
+	if reg.Private && !h.opts.PrivateTunnels {
+		return errMsg(protocol.CodeUnsupported, "private tunnels need the dashboard (PostgreSQL) on this server")
+	}
 	t := &Tunnel{
-		ID: randomID(12), Proto: reg.Proto, UserID: s.userID, CreatedAt: time.Now(),
+		ID: randomID(12), Proto: reg.Proto, UserID: s.userID, CreatedAt: time.Now(), Private: reg.Private,
 		sess: s, sem: make(chan struct{}, h.opts.MaxConnsPerTunnel),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -662,7 +674,7 @@ func (h *Hub) register(s *session, reg *protocol.Register) *protocol.Message {
 	}
 	h.log.Info("tunnel registered", "tunnel", t.ID, "session", s.id, "user", s.userID, "url", t.PublicURL)
 	return &protocol.Message{Type: protocol.TypeRegistered, Registered: &protocol.Registered{
-		TunnelID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port, PublicURL: t.PublicURL,
+		TunnelID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port, PublicURL: t.PublicURL, Private: t.Private,
 	}}
 }
 

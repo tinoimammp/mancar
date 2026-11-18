@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/tinoimammp/mancar/internal/access"
 	"github.com/tinoimammp/mancar/internal/gateway"
 	"github.com/tinoimammp/mancar/internal/router"
 )
@@ -257,5 +259,109 @@ func TestAccessLogOmitsQueryString(t *testing.T) {
 	}
 	if strings.Contains(out, "SUPERSECRET") || strings.Contains(out, "token=") {
 		t.Errorf("access log leaks the query string: %s", out)
+	}
+}
+
+func TestPrivateTunnel(t *testing.T) {
+	k := access.New("secret", true)
+	h := newHarness(t, func(o *router.Options) {
+		o.Access = k
+		o.SignInURL = func(target string) string { return "https://mydomain.com/dashboard/#ref=" + url.PathEscape(target) }
+	})
+	h.tunnels.hosts["app.mydomain.com"].UserID = "u1"
+	h.tunnels.hosts["app.mydomain.com"].Private = true
+	send := func(method, path string, set func(*http.Request)) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "https://app.mydomain.com"+path, nil)
+		req.Host = "app.mydomain.com"
+		if set != nil {
+			set(req)
+		}
+		rec := httptest.NewRecorder()
+		h.rt.ServeHTTP(rec, req)
+		return rec
+	}
+	html := func(r *http.Request) { r.Header.Set("Accept", "text/html,*/*") }
+
+	rec := send("GET", "/x?y=1", html)
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "https://mydomain.com/dashboard/#ref=app.mydomain.com%2Fx%3Fy=1" {
+		t.Errorf("browser without access: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if rec := send("GET", "/api", nil); rec.Code != http.StatusUnauthorized || rec.Header().Get(router.HeaderError) != "private_tunnel" {
+		t.Errorf("API client without access: %d", rec.Code)
+	}
+	if rec := send("POST", "/x", html); rec.Code != http.StatusUnauthorized {
+		t.Errorf("POST without access: %d", rec.Code)
+	}
+	if _, ids := h.tunnels.snapshot(); len(ids) != 0 {
+		t.Fatalf("a refused request reached the tunnel: %v", ids)
+	}
+
+	// someone else's ticket (another account) and a forged one are refused
+	if rec := send("GET", access.Path+"?ticket="+url.QueryEscape(k.Ticket("app.mydomain.com", "u2")), nil); rec.Code != http.StatusForbidden {
+		t.Errorf("ticket of another account: %d", rec.Code)
+	}
+	if rec := send("GET", access.Path+"?ticket=forged.sig", nil); rec.Code != http.StatusForbidden {
+		t.Errorf("forged ticket: %d", rec.Code)
+	}
+	ticket := url.QueryEscape(k.Ticket("app.mydomain.com", "u1"))
+	rec = send("GET", access.Path+"?next=%2Fx%3Fy%3D1&ticket="+ticket, nil)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/x?y=1" {
+		t.Fatalf("redeem: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "__Host-mancar_access" {
+		t.Fatalf("cookies: %v", cookies)
+	}
+	if rec := send("GET", access.Path+"?ticket="+ticket, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("ticket used twice: %d", rec.Code)
+	}
+	// with the cookie the request goes on to the tunnel (gone here: 502)
+	rec = send("GET", "/x", func(r *http.Request) { r.AddCookie(cookies[0]) })
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("with access: %d %s", rec.Code, rec.Body)
+	}
+	if _, ids := h.tunnels.snapshot(); len(ids) != 1 {
+		t.Errorf("tunnel dials: %v", ids)
+	}
+}
+
+func TestPrivateTunnelShowsTheRestrictedPage(t *testing.T) {
+	var gotHost, gotSignIn string
+	h := newHarness(t, func(o *router.Options) {
+		o.Access = access.New("secret", true)
+		o.SignInURL = func(target string) string { return "https://mydomain.com/dashboard/#ref=" + url.PathEscape(target) }
+		o.Restricted = func(w http.ResponseWriter, host, signIn string) {
+			gotHost, gotSignIn = host, signIn
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	})
+	h.tunnels.hosts["app.mydomain.com"].Private = true
+	req := httptest.NewRequest("GET", "https://app.mydomain.com/x", nil)
+	req.Host = "app.mydomain.com"
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	h.rt.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || gotHost != "app.mydomain.com" || gotSignIn != "https://mydomain.com/dashboard/#ref=app.mydomain.com%2Fx" {
+		t.Errorf("status %d, host %q, sign in %q", rec.Code, gotHost, gotSignIn)
+	}
+}
+
+func TestReplayIntoAPrivateTunnelIsNotStopped(t *testing.T) {
+	h := newHarness(t, func(o *router.Options) { o.Access = access.New("secret", true) })
+	h.tunnels.hosts["app.mydomain.com"].Private = true
+	req := httptest.NewRequest("POST", "https://app.mydomain.com/hook", nil)
+	req.Host = "app.mydomain.com"
+	rec := httptest.NewRecorder()
+	h.rt.ServeHTTP(rec, req.WithContext(router.WithReplay(req.Context())))
+	if rec.Code != http.StatusBadGateway { // forwarded (the fake tunnel is gone)
+		t.Errorf("replay: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPrivateTunnelWithoutAccessKeeperIsClosed(t *testing.T) {
+	h := newHarness(t, nil)
+	h.tunnels.hosts["app.mydomain.com"].Private = true
+	if rec := h.do("GET", "app.mydomain.com", "/", nil); rec.Code != http.StatusForbidden {
+		t.Errorf("status %d", rec.Code)
 	}
 }

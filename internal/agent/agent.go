@@ -41,6 +41,7 @@ type TunnelSpec struct {
 	Proto     string `json:"proto"`
 	LocalAddr string `json:"addr"`                // host:port of the local service
 	Subdomain string `json:"subdomain,omitempty"` // empty = random (HTTP only)
+	Private   bool   `json:"private,omitempty"`   // only the owner can open it (HTTP only)
 }
 
 // Options configures an Agent.
@@ -309,14 +310,14 @@ func (a *Agent) registerAll(sess *yamux.Session) ([]TunnelStatus, error) {
 		if a.assigned[i] != "" {
 			label = a.assigned[i] // keep the same public name across reconnects
 		}
-		m, err := call(i, protocol.Register{Proto: spec.Proto, Subdomain: label})
+		m, err := call(i, protocol.Register{Proto: spec.Proto, Subdomain: label, Private: spec.Private})
 		if err != nil {
 			return nil, err
 		}
 		if m.Type == protocol.TypeError && m.Error != nil && m.Error.Code == protocol.CodeHostnameTaken &&
 			spec.Subdomain == "" && label != "" {
 			// Our previous random name was taken meanwhile: get a new one.
-			if m, err = call(i, protocol.Register{Proto: spec.Proto}); err != nil {
+			if m, err = call(i, protocol.Register{Proto: spec.Proto, Private: spec.Private}); err != nil {
 				return nil, err
 			}
 		}
@@ -326,6 +327,12 @@ func (a *Agent) registerAll(sess *yamux.Session) ([]TunnelStatus, error) {
 				perr = &protocol.Error{Code: protocol.CodeInternal, Message: "unexpected server response"}
 			}
 			return nil, &RegistrationError{Spec: spec, Err: perr}
+		}
+		if spec.Private && !m.Registered.Private {
+			// An older gateway ignored "private": never serve it publicly.
+			// The caller closes the session, which removes the tunnel.
+			return nil, &RegistrationError{Spec: spec, Err: &protocol.Error{Code: protocol.CodeUnsupported,
+				Message: "this server does not support private tunnels; update it, or run without --private"}}
 		}
 		if m.Registered.Hostname != "" {
 			a.assigned[i], _, _ = strings.Cut(m.Registered.Hostname, ".")

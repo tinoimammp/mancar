@@ -83,6 +83,10 @@ type Register struct {
 	// Subdomain is a single DNS label for HTTP tunnels. Empty means "assign
 	// a random one".
 	Subdomain string `json:"subdomain,omitempty"`
+	// Private asks for an HTTP tunnel only its owner can open (after
+	// signing in to the dashboard). A gateway that does not know the field
+	// ignores it; Registered.Private tells the agent whether it was applied.
+	Private bool `json:"private,omitempty"`
 }
 
 // Registered confirms a tunnel.
@@ -92,6 +96,7 @@ type Registered struct {
 	Hostname  string `json:"hostname,omitempty"`
 	Port      int    `json:"port,omitempty"`
 	PublicURL string `json:"public_url"`
+	Private   bool   `json:"private,omitempty"`
 }
 
 // Unregister removes one tunnel while keeping the session.

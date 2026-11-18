@@ -564,3 +564,15 @@ func TestGracefulShutdown(t *testing.T) {
 		t.Fatalf("hostname not released on shutdown: %v", err)
 	}
 }
+
+// Private tunnels sign visitors in through the dashboard, so a gateway
+// without accounts refuses them instead of serving them publicly.
+func TestPrivateTunnelNeedsTheDashboard(t *testing.T) {
+	e := newEnv(t, nil)
+	spec := httpSpec(echoServer(t, "one").URL, "")
+	spec.Private = true
+	err := e.startAgent(e.token("alice"), "", spec).waitExit(t)
+	if code := registrationCode(err); code != protocol.CodeUnsupported {
+		t.Fatalf("registration code = %s", code)
+	}
+}
