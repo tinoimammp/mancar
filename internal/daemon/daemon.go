@@ -9,10 +9,7 @@
 package daemon
 
 import (
-	"bufio"
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -63,23 +60,30 @@ func OSEnv() Env {
 
 const usage = `mancard - self-hosted tunnel gateway
 
-Usage:
-  mancard [serve]                         run the gateway (default)
-  mancard migrate                         apply database migrations and exit
-  mancard token create --user NAME [--name LABEL]
-                                            create an agent token (shown once)
-  mancard token list                      list agent tokens
-  mancard token revoke ID                 revoke an agent token
-  mancard token generate                  print a random token (for DEV_AGENT_TOKEN)
-  mancard admin set --user NAME [--password-stdin]
-                                            create a dashboard admin or reset its password
-                                            (a strong password is generated unless
-                                            --password-stdin is given)
-  mancard admin list                      list dashboard admins
-  mancard admin delete NAME               delete a dashboard admin
-  mancard healthcheck                     exit 0 if the local gateway is healthy
-  mancard version
+Usage: mancard COMMAND [ARGUMENTS]
 
+Server:
+  mancard [serve]                            run the gateway (default)
+  mancard migrate                            apply database migrations and exit
+  mancard healthcheck                        exit 0 if the local gateway is healthy
+  mancard version                            print the version
+
+` + userUsage + `
+Agent tokens (what the mancar client connects with):
+  mancard token create --user NAME [--name LABEL]
+                                               create a token for NAME (shown once)
+  mancard token list                         every token: user, label, last use, status
+  mancard token revoke ID                    revoke a token
+  mancard token generate                     print a random token (for DEV_AGENT_TOKEN)
+
+Older forms, still accepted:
+  mancard admin set --user NAME [--password-stdin]
+                                               = user create NAME --admin, or user password
+                                                 NAME + user role NAME admin if it exists
+  mancard admin list                         = user list (admins only)
+  mancard admin delete NAME                  = user role NAME user
+
+Help for one group: mancard user help
 Configuration is read from environment variables; see .env.example.
 `
 
@@ -96,6 +100,8 @@ func Main(ctx context.Context, args []string, e Env) int {
 		return withConfig(e, false, func(cfg *config.Config, log *slog.Logger) int { return cmdMigrate(ctx, e, cfg, log) })
 	case "token":
 		return cmdToken(ctx, e, args)
+	case "user", "users":
+		return cmdUser(ctx, e, args)
 	case "admin":
 		return cmdAdmin(ctx, e, args)
 	case "healthcheck":
@@ -347,7 +353,7 @@ func cmdToken(ctx context.Context, e Env, args []string) int {
 				fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
 				return 1
 			}
-			fmt.Fprintln(e.Stdout, "token revoked; connected agents using it are disconnected on their next reconnect")
+			fmt.Fprintln(e.Stdout, "token revoked; agents connected with it are dropped within 30 seconds")
 			return 0
 		}
 	})
@@ -384,28 +390,9 @@ func cmdAdmin(ctx context.Context, e Env, args []string) int {
 			return 2
 		}
 		*user = u
-		if *fromStdin {
-			if e.Stdin == nil {
-				fmt.Fprintln(e.Stderr, "mancard: no standard input available")
-				return 2
-			}
-			line, err := bufio.NewReader(io.LimitReader(e.Stdin, 4096)).ReadString('\n')
-			if err != nil && !errors.Is(err, io.EOF) {
-				fmt.Fprintf(e.Stderr, "mancard: reading password: %v\n", err)
-				return 1
-			}
-			password = strings.TrimRight(line, "\r\n")
-		} else {
-			b := make([]byte, 18)
-			if _, err := rand.Read(b); err != nil {
-				fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
-				return 1
-			}
-			password, generated = base64.RawURLEncoding.EncodeToString(b), true
-		}
-		if len([]rune(password)) < dashboard.MinPasswordLength {
-			fmt.Fprintf(e.Stderr, "mancard: %v\n", dashboard.ErrWeakPassword)
-			return 2
+		var code int
+		if password, generated, code = readPassword(e, *fromStdin); code != 0 {
+			return code
 		}
 	}
 
@@ -436,7 +423,7 @@ func cmdAdmin(ctx context.Context, e Env, args []string) int {
 			if generated {
 				fmt.Fprintln(e.Stdout, password)
 			}
-			what := "Password reset for admin %q; their existing sessions are signed out."
+			what := "Admin %q: password set; their existing sessions are signed out."
 			if created {
 				what = "Created admin %q."
 			}
@@ -476,7 +463,7 @@ func cmdAdmin(ctx context.Context, e Env, args []string) int {
 				fmt.Fprintf(e.Stderr, "mancard: %v\n", err)
 				return 1
 			}
-			fmt.Fprintln(e.Stdout, "admin deleted; their sessions end immediately")
+			fmt.Fprintln(e.Stdout, "admin rights removed; the account is now a user (delete it in the dashboard if it is not needed)")
 			return 0
 		}
 	})

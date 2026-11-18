@@ -63,6 +63,15 @@ func run(t *testing.T, vars map[string]string, args ...string) result {
 	return result{code, out.String(), errb.String()}
 }
 
+func runStdin(t *testing.T, vars map[string]string, stdin string, args ...string) result {
+	t.Helper()
+	var out, errb syncBuf
+	code := daemon.Main(context.Background(), args, daemon.Env{
+		Getenv: envFn(vars), Stdin: strings.NewReader(stdin), Stdout: &out, Stderr: &errb, DBWait: 1500 * time.Millisecond,
+	})
+	return result{code, out.String(), errb.String()}
+}
+
 // running is a "serve" started in the background on a loopback port.
 type running struct {
 	addr           string

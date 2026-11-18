@@ -35,6 +35,24 @@ func TestTokenUsageErrors(t *testing.T) {
 	}
 }
 
+func TestUserUsage(t *testing.T) {
+	if r := run(t, nil, "user", "help"); r.code != 0 || !strings.Contains(r.stdout, "mancard user password NAME") {
+		t.Errorf("user help: %+v", r)
+	}
+	for _, args := range [][]string{
+		{"user"}, {"user", "bogus"}, {"user", "password"}, {"user", "role", "tino"},
+		{"user", "role", "tino", "root"}, {"user", "delete", "Bad Name!"}, {"user", "list", "extra"},
+	} {
+		if r := run(t, devVars(), args...); r.code != 2 {
+			t.Errorf("%v: exit %d, want 2 (%s)", args, r.code, r.stderr)
+		}
+	}
+	// a short password from stdin is refused before touching the database
+	if r := runStdin(t, devVars(), "short\n", "user", "password", "tino", "--password-stdin"); r.code != 2 || !strings.Contains(r.stderr, "at least") {
+		t.Errorf("short password: %+v", r)
+	}
+}
+
 func TestTokenGenerateNeedsNoConfiguration(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 20; i++ {
