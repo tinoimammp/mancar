@@ -1,7 +1,6 @@
 package dashboard_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,81 +13,6 @@ import (
 	"github.com/tinoimammp/mancar/internal/store/postgres"
 	"github.com/tinoimammp/mancar/internal/usage"
 )
-
-// fakeStore is an in-memory dashboard.Store.
-type fakeStore struct {
-	admins  map[string]postgres.Admin // by username
-	users   []postgres.UserInfo
-	tokens  []postgres.TokenInfo
-	domains []postgres.DomainInfo
-	usage   map[string]postgres.UsageWindows
-}
-
-func (f *fakeStore) AdminByUsername(_ context.Context, u string) (postgres.Admin, error) {
-	if a, ok := f.admins[u]; ok {
-		return a, nil
-	}
-	return postgres.Admin{}, postgres.ErrNotFound
-}
-
-func (f *fakeStore) AdminByID(_ context.Context, id string) (postgres.Admin, error) {
-	for _, a := range f.admins {
-		if a.ID == id {
-			return a, nil
-		}
-	}
-	return postgres.Admin{}, postgres.ErrNotFound
-}
-
-func (f *fakeStore) TouchAdminLogin(context.Context, string) error { return nil }
-
-func (f *fakeStore) ListUsers(context.Context) ([]postgres.UserInfo, error) { return f.users, nil }
-
-func (f *fakeStore) EnsureUser(_ context.Context, u string) (string, error) {
-	for _, x := range f.users {
-		if x.Username == u {
-			return x.ID, nil
-		}
-	}
-	f.users = append(f.users, postgres.UserInfo{ID: "u-" + u, Username: u})
-	return "u-" + u, nil
-}
-
-func (f *fakeStore) DeleteUser(_ context.Context, id string) error { return nil }
-
-func (f *fakeStore) ListAgentTokens(context.Context) ([]postgres.TokenInfo, error) {
-	return f.tokens, nil
-}
-
-func (f *fakeStore) CreateAgentToken(_ context.Context, uid, name string) (string, string, error) {
-	f.tokens = append(f.tokens, postgres.TokenInfo{ID: "t1", Name: name})
-	return "mc_secret", "t1", nil
-}
-
-func (f *fakeStore) RevokeAgentToken(_ context.Context, id string) error {
-	for i := range f.tokens {
-		if f.tokens[i].ID == id && f.tokens[i].RevokedAt == nil {
-			now := time.Now()
-			f.tokens[i].RevokedAt = &now
-			return nil
-		}
-	}
-	return postgres.ErrNotFound
-}
-
-func (f *fakeStore) ListDomains(context.Context) ([]postgres.DomainInfo, error) {
-	return f.domains, nil
-}
-
-func (f *fakeStore) ReleaseDomain(context.Context, string) error { return postgres.ErrNotFound }
-
-func (f *fakeStore) UsageByHost(context.Context) (map[string]postgres.UsageWindows, error) {
-	return f.usage, nil
-}
-
-func (f *fakeStore) UsageByUser(context.Context) (map[string]postgres.UsageWindows, error) {
-	return nil, nil
-}
 
 type fakeHub struct{ disconnectedTokens []string }
 
@@ -108,9 +32,8 @@ func setup(t *testing.T) (*dashboard.Dashboard, *fakeStore, *fakeHub) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := &fakeStore{admins: map[string]postgres.Admin{
-		"root": {ID: "a1", Username: "root", PasswordHash: hash, PasswordChangedAt: time.Now().Add(-time.Hour)},
-	}}
+	st := newFakeStore()
+	st.add(postgres.Account{ID: "a1", Username: "root", Role: postgres.RoleAdmin, PasswordHash: hash, PasswordChangedAt: time.Now().Add(-time.Hour)})
 	hub := &fakeHub{}
 	d := dashboard.New(dashboard.Options{
 		Store: st, Hub: hub, SessionSecret: strings.Repeat("s", 32), Secure: true,
@@ -278,13 +201,13 @@ func TestTokenCreateAndRevoke(t *testing.T) {
 func TestPasswordResetEndsSessions(t *testing.T) {
 	d, st, _ := setup(t)
 	c := login(t, d)
-	a := st.admins["root"]
+	a := st.accounts["a1"]
 	a.PasswordChangedAt = time.Now().Add(time.Second)
-	st.admins["root"] = a
+	st.accounts["a1"] = a
 	if rec := do(d, req{method: "GET", path: "/api/v1/admin/session", cookie: c}); rec.Code != http.StatusUnauthorized {
 		t.Errorf("session survived a password reset: %d", rec.Code)
 	}
-	delete(st.admins, "root")
+	delete(st.accounts, "a1")
 	if rec := do(d, req{method: "GET", path: "/api/v1/admin/session", cookie: c}); rec.Code != http.StatusUnauthorized {
 		t.Errorf("session survived admin deletion: %d", rec.Code)
 	}

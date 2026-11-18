@@ -629,6 +629,8 @@ func (h *Hub) register(s *session, reg *protocol.Register) *protocol.Message {
 			return errMsg(protocol.CodeHostnameTaken, "%s is not available", domain.NormalizeLabel(reg.Subdomain))
 		case errors.Is(err, domain.ErrInvalidLabel):
 			return errMsg(protocol.CodeHostnameInvalid, "%s", strings.TrimPrefix(err.Error(), "domain: "))
+		case errors.Is(err, domain.ErrLimitReached):
+			return errMsg(protocol.CodeLimitExceeded, "you have reached your custom subdomain limit; release one in the dashboard or use a random subdomain")
 		case err != nil:
 			h.log.Error("hostname reservation failed", "err", err)
 			return errMsg(protocol.CodeInternal, "could not reserve a hostname")

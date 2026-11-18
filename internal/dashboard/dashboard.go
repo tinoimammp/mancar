@@ -1,16 +1,25 @@
 // Package dashboard serves the web dashboard and its JSON API on the base
-// domain: /dashboard/ (static single-page app, embedded in the binary) and
-// /api/v1/admin/* (session-authenticated operator API).
+// domain: /dashboard/ (static single-page app, embedded in the binary),
+// /api/v1/auth/* (sign in, sign up, email links), /api/v1/admin/* (the
+// whole gateway, admins only) and /api/v1/me/* (a signed-in account's own
+// tunnels, tokens and requests).
 //
 // Security model:
-//   - Admins log in with a username and password (PBKDF2-SHA256). Admin
-//     accounts are created on the server with "mancard admin set".
+//   - Accounts sign in with a username or email and a password
+//     (PBKDF2-SHA256). Admins are made with "mancard user create NAME --admin" or promoted
+//     in the dashboard; users are made by an admin or by web sign up
+//     (REGISTER_ENABLED), which confirms the email address first.
 //   - The session is an HMAC-signed cookie (HttpOnly, SameSite=Strict, Secure
-//     over HTTPS) re-validated against the database on every request.
+//     over HTTPS) re-validated against the database on every request: the
+//     role, a disabled flag and a password change take effect at once.
+//   - Every /me endpoint works on the signed-in account only; the account is
+//     never taken from the request. /admin endpoints refuse non-admins.
 //   - State-changing requests must carry the X-Mancar-CSRF header and, when the
 //     browser sends one, an Origin of the dashboard itself. Together with
 //     SameSite=Strict this blocks cross-site request forgery.
-//   - Failed logins are limited per client address and per username.
+//   - Sign up, "forgot password" and "send again" answer the same whether an
+//     address is registered or not; the difference only shows in the email
+//     its owner receives. Failed logins and email sending are rate limited.
 //   - Agent token secrets are shown exactly once, in the create response.
 package dashboard
 
@@ -19,6 +28,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -32,6 +42,7 @@ import (
 
 	"github.com/tinoimammp/mancar/internal/gateway"
 	"github.com/tinoimammp/mancar/internal/inspect"
+	"github.com/tinoimammp/mancar/internal/mail"
 	"github.com/tinoimammp/mancar/internal/netutil"
 	"github.com/tinoimammp/mancar/internal/ratelimit"
 	"github.com/tinoimammp/mancar/internal/store/postgres"
@@ -45,17 +56,34 @@ var staticFS embed.FS
 // Store is the persistence the dashboard needs (implemented by
 // *postgres.Store).
 type Store interface {
-	AdminByUsername(ctx context.Context, username string) (postgres.Admin, error)
-	AdminByID(ctx context.Context, id string) (postgres.Admin, error)
-	TouchAdminLogin(ctx context.Context, id string) error
+	AccountByID(ctx context.Context, id string) (postgres.Account, error)
+	AccountByLogin(ctx context.Context, login string) (postgres.Account, error)
+	AccountByEmail(ctx context.Context, email string) (postgres.Account, error)
+	TouchLogin(ctx context.Context, id string) error
+	CreateAccount(ctx context.Context, n postgres.NewAccount) (string, error)
+	AdminExists(ctx context.Context) (bool, error)
+	CreateFirstAdmin(ctx context.Context, n postgres.NewAccount) (string, error)
+	SetPassword(ctx context.Context, id, hash string) error
+	SetEmailVerified(ctx context.Context, id string, verified bool) error
+	SetEmail(ctx context.Context, id, email string) error
+	SetLimits(ctx context.Context, id string, maxTokens, maxCustomDomains *int) error
+	SetRole(ctx context.Context, id, role string) error
+	SetDisabled(ctx context.Context, id string, disabled bool) error
+	DeleteAccount(ctx context.Context, id string) error
+	CreateEmailLink(ctx context.Context, userID, purpose string, ttl time.Duration) (string, error)
+	UseEmailLink(ctx context.Context, purpose, secret string) (string, error)
+	PurgeUnconfirmed(ctx context.Context, olderThan time.Time) (int64, error)
+	AddAudit(ctx context.Context, e postgres.AuditEntry) error
+	ListAudit(ctx context.Context, limit int) ([]postgres.AuditEntry, error)
+	PurgeAudit(ctx context.Context, before time.Time) error
 
 	ListUsers(ctx context.Context) ([]postgres.UserInfo, error)
 	EnsureUser(ctx context.Context, username string) (string, error)
-	DeleteUser(ctx context.Context, id string) error
 
 	ListAgentTokens(ctx context.Context) ([]postgres.TokenInfo, error)
 	CreateAgentToken(ctx context.Context, userID, name string) (plaintext, id string, err error)
 	RevokeAgentToken(ctx context.Context, id string) error
+	RevokeUserTokens(ctx context.Context, userID string) ([]string, error)
 
 	ListDomains(ctx context.Context) ([]postgres.DomainInfo, error)
 	ReleaseDomain(ctx context.Context, hostname string) error
@@ -96,18 +124,34 @@ type Options struct {
 	Inspector *inspect.Recorder
 	// Replay serves replayed requests (the public router).
 	Replay http.Handler
+	// Mailer sends email links; nil turns sign up and "forgot password" off.
+	Mailer mail.Sender
+	// RegisterEnabled opens web sign up (REGISTER_ENABLED; needs Mailer).
+	RegisterEnabled bool
+	// MaxTunnels is how many tunnels one account can have open at once
+	// (MAX_AGENTS_PER_USER x MAX_TUNNELS_PER_AGENT), shown to users.
+	MaxTunnels int
 }
 
 // Dashboard is an http.Handler for /dashboard/ and /api/v1/admin/.
 type Dashboard struct {
-	opts      Options
-	log       *slog.Logger
-	signer    signer
-	cookie    string
-	byIP      *ratelimit.FailureLimiter
-	byUser    *ratelimit.FailureLimiter
-	mux       *http.ServeMux
-	startedAt time.Time
+	opts   Options
+	log    *slog.Logger
+	signer signer
+	cookie string
+	byIP   *ratelimit.FailureLimiter
+	byUser *ratelimit.FailureLimiter
+	// mailByIP and mailByAddr bound the emails one client can make the
+	// gateway send (sign up, send again, forgot password), so it can be used
+	// neither to spam an address nor to probe many.
+	mailByIP   *ratelimit.FailureLimiter
+	mailByAddr *ratelimit.FailureLimiter
+	// device login ("mancar login"): pending requests, and a bound on how
+	// many one client may start
+	devices    *deviceFlows
+	deviceByIP *ratelimit.FailureLimiter
+	mux        *http.ServeMux
+	startedAt  time.Time
 }
 
 // HeaderCSRF must be present on every state-changing API request.
@@ -128,10 +172,14 @@ func New(opts Options) *Dashboard {
 	}
 	d := &Dashboard{
 		opts: opts, log: opts.Logger, signer: newSigner(opts.SessionSecret),
-		byIP:      ratelimit.NewFailureLimiter(10, 15*time.Minute),
-		byUser:    ratelimit.NewFailureLimiter(10, 15*time.Minute),
-		mux:       http.NewServeMux(),
-		startedAt: opts.Now(),
+		byIP:       ratelimit.NewFailureLimiter(10, 15*time.Minute),
+		byUser:     ratelimit.NewFailureLimiter(10, 15*time.Minute),
+		mailByIP:   ratelimit.NewFailureLimiter(5, time.Hour),
+		mailByAddr: ratelimit.NewFailureLimiter(3, time.Hour),
+		devices:    newDeviceFlows(),
+		deviceByIP: ratelimit.NewFailureLimiter(20, time.Hour),
+		mux:        http.NewServeMux(),
+		startedAt:  opts.Now(),
 	}
 	// The __Host- prefix makes browsers refuse the cookie unless it is Secure,
 	// host-only and Path=/, so a sibling tunnel subdomain can never set or
@@ -148,26 +196,69 @@ func New(opts Options) *Dashboard {
 		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
 	})
 
-	d.mux.HandleFunc("POST /api/v1/admin/login", d.login)
-	d.mux.HandleFunc("POST /api/v1/admin/logout", d.logout)
-	d.mux.HandleFunc("GET /api/v1/admin/session", d.authed(d.session))
-	d.mux.HandleFunc("GET /api/v1/admin/overview", d.authed(d.overview))
-	d.mux.HandleFunc("GET /api/v1/admin/agents", d.authed(d.agents))
-	d.mux.HandleFunc("POST /api/v1/admin/agents/{id}/disconnect", d.authed(d.disconnectAgent))
-	d.mux.HandleFunc("GET /api/v1/admin/users", d.authed(d.users))
-	d.mux.HandleFunc("DELETE /api/v1/admin/users/{id}", d.authed(d.deleteUser))
-	d.mux.HandleFunc("GET /api/v1/admin/tokens", d.authed(d.tokens))
-	d.mux.HandleFunc("POST /api/v1/admin/tokens", d.authed(d.createToken))
-	d.mux.HandleFunc("POST /api/v1/admin/tokens/{id}/revoke", d.authed(d.revokeToken))
-	d.mux.HandleFunc("GET /api/v1/admin/domains", d.authed(d.domains))
-	d.mux.HandleFunc("DELETE /api/v1/admin/domains/{hostname}", d.authed(d.releaseDomain))
-	d.mux.HandleFunc("GET /api/v1/admin/requests", d.authed(d.listRequests))
-	d.mux.HandleFunc("DELETE /api/v1/admin/requests", d.authed(d.clearRequests))
-	d.mux.HandleFunc("GET /api/v1/admin/requests/{id}", d.authed(d.getRequest))
-	d.mux.HandleFunc("POST /api/v1/admin/requests/{id}/replay", d.authed(d.replayRequest))
-	d.mux.HandleFunc("/api/v1/admin/", func(w http.ResponseWriter, _ *http.Request) {
-		writeErr(w, http.StatusNotFound, "not_found", "no such endpoint")
-	})
+	// sign in, sign up, email links (the old /api/v1/admin paths still work)
+	for _, base := range []string{"/api/v1/auth", "/api/v1/admin"} {
+		d.mux.HandleFunc("POST "+base+"/login", d.login)
+		d.mux.HandleFunc("POST "+base+"/logout", d.logout)
+		d.mux.HandleFunc("GET "+base+"/session", d.authed(false, d.session))
+	}
+	d.mux.HandleFunc("GET /api/v1/auth/options", d.authOptions)
+	d.mux.HandleFunc("POST /api/v1/auth/setup", d.setup)
+	d.mux.HandleFunc("POST /api/v1/auth/device", d.deviceStart)
+	d.mux.HandleFunc("POST /api/v1/auth/device/token", d.deviceToken)
+	d.mux.HandleFunc("POST /api/v1/auth/signup", d.signup)
+	d.mux.HandleFunc("POST /api/v1/auth/signup/verify", d.verifyEmail)
+	d.mux.HandleFunc("POST /api/v1/auth/signup/resend", d.resendPublic)
+	d.mux.HandleFunc("POST /api/v1/auth/password/forgot", d.forgotPassword)
+	d.mux.HandleFunc("POST /api/v1/auth/password/reset", d.resetPassword)
+
+	// the whole gateway: admins only
+	admin := func(pattern string, h http.HandlerFunc) { d.mux.HandleFunc(pattern, d.authed(true, h)) }
+	admin("GET /api/v1/admin/overview", d.overview)
+	admin("GET /api/v1/admin/agents", d.agents)
+	admin("POST /api/v1/admin/agents/{id}/disconnect", d.disconnectAgent)
+	admin("GET /api/v1/admin/users", d.users)
+	admin("POST /api/v1/admin/users", d.createUser)
+	admin("PATCH /api/v1/admin/users/{id}", d.updateUser)
+	admin("DELETE /api/v1/admin/users/{id}", d.deleteUser)
+	admin("POST /api/v1/admin/users/{id}/revoke-tokens", d.revokeUserTokens)
+	admin("POST /api/v1/admin/users/{id}/reset-password", d.adminResetPassword)
+	admin("POST /api/v1/admin/users/{id}/resend-verification", d.adminResendVerification)
+	admin("GET /api/v1/admin/audit", d.auditLog)
+	admin("GET /api/v1/admin/tokens", d.tokens)
+	admin("POST /api/v1/admin/tokens", d.createToken)
+	admin("POST /api/v1/admin/tokens/{id}/revoke", d.revokeToken)
+	admin("GET /api/v1/admin/domains", d.domains)
+	admin("DELETE /api/v1/admin/domains/{hostname}", d.releaseDomain)
+	admin("GET /api/v1/admin/requests", d.listRequests)
+	admin("DELETE /api/v1/admin/requests", d.clearRequests)
+	admin("GET /api/v1/admin/requests/{id}", d.getRequest)
+	admin("POST /api/v1/admin/requests/{id}/replay", d.replayRequest)
+
+	// the signed-in account's own things (any role)
+	me := func(pattern string, h http.HandlerFunc) { d.mux.HandleFunc(pattern, d.authed(false, mine(h))) }
+	me("GET /api/v1/me/overview", d.myOverview)
+	me("GET /api/v1/me/tokens", d.myTokens)
+	me("POST /api/v1/me/tokens", d.myCreateToken)
+	me("POST /api/v1/me/tokens/{id}/revoke", d.myRevokeToken)
+	me("DELETE /api/v1/me/domains/{hostname}", d.myReleaseDomain)
+	me("GET /api/v1/me/requests", d.listRequests)
+	me("DELETE /api/v1/me/requests", d.clearRequests)
+	me("GET /api/v1/me/requests/{id}", d.getRequest)
+	me("POST /api/v1/me/requests/{id}/replay", d.replayRequest)
+	me("GET /api/v1/me/account", d.myAccount)
+	me("POST /api/v1/me/account/password", d.myChangePassword)
+	me("POST /api/v1/me/account/verify/resend", d.myResendVerification)
+	me("DELETE /api/v1/me/account", d.myDeleteAccount)
+	me("GET /api/v1/me/device/{code}", d.myDevice)
+	me("POST /api/v1/me/device/{code}/approve", d.myDeviceApprove)
+	me("POST /api/v1/me/device/{code}/deny", d.myDeviceDeny)
+
+	for _, p := range []string{"/api/v1/admin/", "/api/v1/auth/", "/api/v1/me/"} {
+		d.mux.HandleFunc(p, func(w http.ResponseWriter, _ *http.Request) {
+			writeErr(w, http.StatusNotFound, "not_found", "no such endpoint")
+		})
+	}
 	return d
 }
 
@@ -224,6 +315,15 @@ func readJSON(r *http.Request, v any) error {
 	return dec.Decode(v)
 }
 
+// origin is the dashboard's own origin, e.g. https://tunnel.example.com.
+func (d *Dashboard) origin() string {
+	o := d.opts.PublicScheme + "://" + d.opts.BaseDomain
+	if d.opts.PublicPort != "" {
+		o += ":" + d.opts.PublicPort
+	}
+	return o
+}
+
 // sameOrigin rejects cross-site state changes: the CSRF header cannot be set
 // by a plain cross-site form, and a cross-origin fetch that sets it needs a
 // CORS preflight this server never approves. Origin is checked as well when
@@ -233,25 +333,20 @@ func (d *Dashboard) sameOrigin(r *http.Request) bool {
 		return false
 	}
 	o := r.Header.Get("Origin")
-	if o == "" {
-		return true
-	}
-	want := d.opts.PublicScheme + "://" + d.opts.BaseDomain
-	if d.opts.PublicPort != "" {
-		want += ":" + d.opts.PublicPort
-	}
-	return strings.EqualFold(o, want)
+	return o == "" || strings.EqualFold(o, d.origin())
 }
 
 func (d *Dashboard) client(r *http.Request) string {
 	return netutil.ClientFromRequest(r, d.opts.TrustedProxies).IP
 }
 
-type ctxAdmin struct{}
+type ctxAccount struct{}
 
 // authed wraps a handler with session validation (and the CSRF check for
-// anything that is not a GET).
-func (d *Dashboard) authed(next http.HandlerFunc) http.HandlerFunc {
+// anything that is not a GET). The account is read from the database on
+// every request, so a new role, a disabled flag or a password change apply
+// at once. adminOnly refuses users.
+func (d *Dashboard) authed(adminOnly bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && !d.sameOrigin(r) {
 			writeErr(w, http.StatusForbidden, "csrf", "cross-site request refused")
@@ -268,8 +363,8 @@ func (d *Dashboard) authed(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "unauthenticated", "session expired, please log in again")
 			return
 		}
-		a, err := d.opts.Store.AdminByID(r.Context(), c.AdminID)
-		if errors.Is(err, postgres.ErrNotFound) || (err == nil && c.IssuedMs < a.PasswordChangedAt.UnixMilli()) {
+		a, err := d.opts.Store.AccountByID(r.Context(), c.ID)
+		if errors.Is(err, postgres.ErrNotFound) || (err == nil && (c.IssuedMs < a.PasswordChangedAt.UnixMilli() || a.DisabledAt != nil)) {
 			d.clearCookie(w)
 			writeErr(w, http.StatusUnauthorized, "unauthenticated", "session is no longer valid, please log in again")
 			return
@@ -278,13 +373,37 @@ func (d *Dashboard) authed(next http.HandlerFunc) http.HandlerFunc {
 			d.internal(w, "session lookup", err)
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), ctxAdmin{}, a)))
+		if adminOnly && !a.IsAdmin() {
+			writeErr(w, http.StatusForbidden, "forbidden", "this needs an admin account")
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), ctxAccount{}, a)))
 	}
 }
 
-func adminFrom(r *http.Request) postgres.Admin {
-	a, _ := r.Context().Value(ctxAdmin{}).(postgres.Admin)
+// accountFrom returns the signed-in account (set by authed).
+func accountFrom(r *http.Request) postgres.Account {
+	a, _ := r.Context().Value(ctxAccount{}).(postgres.Account)
 	return a
+}
+
+type ctxMine struct{}
+
+// mine marks a request as scoped to the signed-in account: shared handlers
+// (the request inspector) then only see that account's data.
+func mine(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		next(w, r.WithContext(context.WithValue(r.Context(), ctxMine{}, true)))
+	}
+}
+
+// scopeUser is the account a request is limited to, or "" for the whole
+// gateway (an admin endpoint).
+func scopeUser(r *http.Request) string {
+	if v, _ := r.Context().Value(ctxMine{}).(bool); v {
+		return accountFrom(r).ID
+	}
+	return ""
 }
 
 func (d *Dashboard) setCookie(w http.ResponseWriter, value string, maxAge int) {
@@ -296,77 +415,22 @@ func (d *Dashboard) setCookie(w http.ResponseWriter, value string, maxAge int) {
 
 func (d *Dashboard) clearCookie(w http.ResponseWriter) { d.setCookie(w, "", -1) }
 
-// ---- authentication --------------------------------------------------------
-
-func (d *Dashboard) login(w http.ResponseWriter, r *http.Request) {
-	if !d.sameOrigin(r) {
-		writeErr(w, http.StatusForbidden, "csrf", "cross-site request refused")
-		return
-	}
-	var in struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := readJSON(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "expected JSON with username and password")
-		return
-	}
-	user := strings.ToLower(strings.TrimSpace(in.Username))
-	ip := d.client(r)
-	if retry, blocked := d.byIP.Blocked(ip); blocked {
-		d.tooMany(w, retry)
-		return
-	}
-	if retry, blocked := d.byUser.Blocked(user); blocked {
-		d.tooMany(w, retry)
-		return
-	}
-
-	a, err := d.opts.Store.AdminByUsername(r.Context(), user)
-	if err != nil && !errors.Is(err, postgres.ErrNotFound) {
-		d.internal(w, "admin lookup", err)
-		return
-	}
-	hash := a.PasswordHash
-	if err != nil {
-		hash = dummyHash // equal work for unknown users
-	}
-	ok, cerr := CheckPassword(hash, in.Password)
-	if err != nil || cerr != nil || !ok {
-		d.byIP.Fail(ip)
-		d.byUser.Fail(user)
-		d.log.Warn("dashboard login failed", "client", ip, "username", user)
-		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "wrong username or password")
-		return
-	}
-
+// startSession sets a session cookie for a. It is issued no earlier than
+// the account's last password change, so a session made right after a
+// change is valid even when the database clock runs a little ahead.
+func (d *Dashboard) startSession(w http.ResponseWriter, a postgres.Account) {
 	now := d.opts.Now()
-	value := d.signer.sign(claims{AdminID: a.ID, Username: a.Username, IssuedMs: now.UnixMilli(),
-		Expires: now.Add(d.opts.SessionTTL).Unix()})
-	d.setCookie(w, value, int(d.opts.SessionTTL/time.Second))
-	if err := d.opts.Store.TouchAdminLogin(r.Context(), a.ID); err != nil {
-		d.log.Warn("dashboard: recording login time failed", "err", err)
+	issued := now.UnixMilli()
+	if pc := a.PasswordChangedAt.UnixMilli(); pc >= issued {
+		issued = pc + 1
 	}
-	d.log.Info("dashboard login", "client", ip, "username", a.Username)
-	writeJSON(w, http.StatusOK, map[string]string{"username": a.Username})
+	value := d.signer.sign(claims{ID: a.ID, Username: a.Username, IssuedMs: issued, Expires: now.Add(d.opts.SessionTTL).Unix()})
+	d.setCookie(w, value, int(d.opts.SessionTTL/time.Second))
 }
 
 func (d *Dashboard) tooMany(w http.ResponseWriter, retry time.Duration) {
 	w.Header().Set("Retry-After", strconv.Itoa(int(retry/time.Second)+1))
-	writeErr(w, http.StatusTooManyRequests, "too_many_attempts", "too many failed logins; try again later")
-}
-
-func (d *Dashboard) logout(w http.ResponseWriter, r *http.Request) {
-	if !d.sameOrigin(r) {
-		writeErr(w, http.StatusForbidden, "csrf", "cross-site request refused")
-		return
-	}
-	d.clearCookie(w)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (d *Dashboard) session(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"username": adminFrom(r).Username})
+	writeErr(w, http.StatusTooManyRequests, "too_many_attempts", "too many attempts; try again later")
 }
 
 // ---- read endpoints --------------------------------------------------------
@@ -482,36 +546,6 @@ func (d *Dashboard) agents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"agents": out})
 }
 
-func (d *Dashboard) users(w http.ResponseWriter, r *http.Request) {
-	users, err := d.opts.Store.ListUsers(r.Context())
-	if err != nil {
-		d.internal(w, "list users", err)
-		return
-	}
-	online := map[string]int{}
-	for _, s := range d.opts.Hub.Sessions() {
-		online[s.UserID]++
-	}
-	traffic, err := d.opts.Store.UsageByUser(r.Context())
-	if err != nil {
-		d.log.Warn("dashboard: reading traffic statistics failed", "err", err)
-	}
-	type user struct {
-		ID           string                `json:"id"`
-		Username     string                `json:"username"`
-		CreatedAt    time.Time             `json:"created_at"`
-		ActiveTokens int                   `json:"active_tokens"`
-		Domains      int                   `json:"domains"`
-		Agents       int                   `json:"connected_agents"`
-		Usage        postgres.UsageWindows `json:"usage"`
-	}
-	out := []user{}
-	for _, u := range users {
-		out = append(out, user{u.ID, u.Username, u.CreatedAt, u.ActiveTokens, u.Domains, online[u.ID], traffic[u.ID]})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": out})
-}
-
 func (d *Dashboard) tokens(w http.ResponseWriter, r *http.Request) {
 	list, err := d.opts.Store.ListAgentTokens(r.Context())
 	if err != nil {
@@ -571,8 +605,13 @@ func (d *Dashboard) domains(w http.ResponseWriter, r *http.Request) {
 
 // ---- write endpoints -------------------------------------------------------
 
-func (d *Dashboard) audit(r *http.Request, action string, args ...any) {
-	d.log.Info("dashboard action", append([]any{"action", action, "admin", adminFrom(r).Username, "client", d.client(r)}, args...)...)
+// audit records an action in the log and the audit log (shown to admins).
+func (d *Dashboard) audit(r *http.Request, action, target, detail string) {
+	actor := accountFrom(r).Username
+	d.log.Info("dashboard action", "action", action, "actor", actor, "target", target, "detail", detail, "client", d.client(r))
+	if err := d.opts.Store.AddAudit(r.Context(), postgres.AuditEntry{Actor: actor, Action: action, Target: target, Detail: detail}); err != nil {
+		d.log.Warn("dashboard: writing the audit log failed", "err", err)
+	}
 }
 
 func (d *Dashboard) disconnectAgent(w http.ResponseWriter, r *http.Request) {
@@ -581,7 +620,7 @@ func (d *Dashboard) disconnectAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "no connected agent with that ID")
 		return
 	}
-	d.audit(r, "agent.disconnect", "session", id)
+	d.audit(r, "agent.disconnect", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -617,7 +656,7 @@ func (d *Dashboard) createToken(w http.ResponseWriter, r *http.Request) {
 		d.internal(w, "create token", err)
 		return
 	}
-	d.audit(r, "token.create", "token", id, "user", user)
+	d.audit(r, "token.create", user, name)
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "user": user, "name": name, "token": tok})
 }
 
@@ -632,27 +671,7 @@ func (d *Dashboard) revokeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n := d.opts.Hub.DisconnectToken(id)
-	d.audit(r, "token.revoke", "token", id, "disconnected", n)
-	writeJSON(w, http.StatusOK, map[string]int{"disconnected_agents": n})
-}
-
-func (d *Dashboard) deleteUser(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	switch err := d.opts.Store.DeleteUser(r.Context(), id); {
-	case errors.Is(err, postgres.ErrNotFound):
-		writeErr(w, http.StatusNotFound, "not_found", "no user with that ID")
-		return
-	case err != nil:
-		d.internal(w, "delete user", err)
-		return
-	}
-	n := 0
-	for _, s := range d.opts.Hub.Sessions() {
-		if s.UserID == id && d.opts.Hub.Disconnect(s.ID) {
-			n++
-		}
-	}
-	d.audit(r, "user.delete", "user", id, "disconnected", n)
+	d.audit(r, "token.revoke", id, fmt.Sprintf("%d agent(s) disconnected", n))
 	writeJSON(w, http.StatusOK, map[string]int{"disconnected_agents": n})
 }
 
@@ -666,6 +685,6 @@ func (d *Dashboard) releaseDomain(w http.ResponseWriter, r *http.Request) {
 		d.internal(w, "release domain", err)
 		return
 	}
-	d.audit(r, "domain.release", "hostname", host)
+	d.audit(r, "domain.release", host, "")
 	w.WriteHeader(http.StatusNoContent)
 }

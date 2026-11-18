@@ -15,11 +15,12 @@ import (
 //	base64url(json claims) "." base64url(HMAC-SHA256(key, json claims))
 //
 // The key is derived from JWT_SECRET. Claims are re-checked against the
-// database on every request (the admin must still exist and must not have
-// changed password since the session was issued), so deleting an admin or
-// resetting a password ends their sessions at once.
+// database on every request (the account must still exist, must not be
+// disabled and must not have changed password since the session was
+// issued), so deleting or disabling an account or resetting a password ends
+// its sessions at once. The role is read from the database, never from here.
 type claims struct {
-	AdminID  string `json:"a"`
+	ID       string `json:"a"` // account ID
 	Username string `json:"u"`
 	IssuedMs int64  `json:"i"`
 	Expires  int64  `json:"e"`
@@ -59,7 +60,7 @@ func (s signer) verify(value string, now time.Time) (claims, error) {
 		return claims{}, errBadSession
 	}
 	var c claims
-	if err := json.Unmarshal(payload, &c); err != nil || c.AdminID == "" {
+	if err := json.Unmarshal(payload, &c); err != nil || c.ID == "" {
 		return claims{}, errBadSession
 	}
 	if now.Unix() >= c.Expires {

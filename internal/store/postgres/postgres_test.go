@@ -563,46 +563,6 @@ func TestSchemaConstraints(t *testing.T) {
 	})
 }
 
-func TestAdmins_SetLookupResetDelete(t *testing.T) {
-	st := newStore(t, true)
-	ctx := context.Background()
-	created, err := st.SetAdmin(ctx, " Root ", "hash1")
-	if err != nil || !created {
-		t.Fatalf("SetAdmin create: created=%v err=%v", created, err)
-	}
-	a, err := st.AdminByUsername(ctx, "root")
-	if err != nil || a.PasswordHash != "hash1" || a.LastLoginAt != nil {
-		t.Fatalf("AdminByUsername: %+v %v", a, err)
-	}
-	if b, err := st.AdminByID(ctx, a.ID); err != nil || b.Username != "root" {
-		t.Fatalf("AdminByID: %+v %v", b, err)
-	}
-	time.Sleep(10 * time.Millisecond)
-	created, err = st.SetAdmin(ctx, "root", "hash2")
-	if err != nil || created {
-		t.Fatalf("SetAdmin reset: created=%v err=%v", created, err)
-	}
-	b, _ := st.AdminByID(ctx, a.ID)
-	if b.PasswordHash != "hash2" || !b.PasswordChangedAt.After(a.PasswordChangedAt) {
-		t.Errorf("reset did not update hash and password_changed_at: %+v", b)
-	}
-	if err := st.TouchAdminLogin(ctx, a.ID); err != nil {
-		t.Fatal(err)
-	}
-	if list, err := st.ListAdmins(ctx); err != nil || len(list) != 1 || list[0].LastLoginAt == nil {
-		t.Errorf("ListAdmins: %+v %v", list, err)
-	}
-	if err := st.DeleteAdmin(ctx, "root"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.AdminByID(ctx, a.ID); !errors.Is(err, postgres.ErrNotFound) {
-		t.Errorf("deleted admin still found: %v", err)
-	}
-	if err := st.DeleteAdmin(ctx, "root"); !errors.Is(err, postgres.ErrNotFound) {
-		t.Errorf("second delete: %v", err)
-	}
-}
-
 func TestUsersAndDomainsListing(t *testing.T) {
 	st := newStore(t, true)
 	ctx := context.Background()

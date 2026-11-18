@@ -19,6 +19,7 @@ import (
 	"github.com/tinoimammp/mancar/internal/domain"
 	"github.com/tinoimammp/mancar/internal/gateway"
 	"github.com/tinoimammp/mancar/internal/inspect"
+	"github.com/tinoimammp/mancar/internal/mail"
 	"github.com/tinoimammp/mancar/internal/netutil"
 	"github.com/tinoimammp/mancar/internal/protocol"
 	"github.com/tinoimammp/mancar/internal/router"
@@ -38,7 +39,9 @@ type Deps struct {
 	// Captures stores the request inspector's records; nil disables it.
 	Captures inspect.Store
 	// Usage stores traffic statistics; nil disables them.
-	Usage  usage.Store
+	Usage usage.Store
+	// Mailer overrides the SMTP sender built from SMTP_URL (tests).
+	Mailer mail.Sender
 	Logger *slog.Logger
 	// TCPBindHost overrides the TCP tunnel bind address (tests use 127.0.0.1).
 	TCPBindHost string
@@ -54,6 +57,7 @@ type Server struct {
 	hub      *gateway.Hub
 	recorder *inspect.Recorder // nil when the inspector is off
 	counter  *usage.Counter    // nil when statistics are off
+	dash     *dashboard.Dashboard
 	handler  http.Handler
 }
 
@@ -138,21 +142,33 @@ func New(d Deps) *Server {
 	}
 	rt := router.New(ropts)
 
+	mailer := d.Mailer
+	if mailer == nil && cfg.SMTPURL != "" {
+		smtp, err := mail.ParseURL(cfg.SMTPURL, "mancar <no-reply@"+cfg.BaseDomain+">")
+		if err != nil {
+			d.Logger.Error("SMTP_URL is unusable; sign up and password reset emails are off", "err", err)
+		} else {
+			mailer = smtp
+		}
+	}
 	dash := dashboard.New(dashboard.Options{
 		Store: d.Admin, Hub: hub, SessionSecret: cfg.JWTSecret, Secure: cfg.PublicScheme == "https",
 		BaseDomain: cfg.BaseDomain, PublicScheme: cfg.PublicScheme, PublicPort: cfg.PublicPort,
 		TCPPortMin: cfg.TCPPortMin, TCPPortMax: cfg.TCPPortMax, TrustedProxies: cfg.TrustedProxies,
 		HealthCheck: d.HealthCheck, Logger: d.Logger, Inspector: recorder, Replay: rt,
+		Mailer: mailer, RegisterEnabled: cfg.RegisterEnabled, MaxTunnels: cfg.MaxAgentsPerUser * cfg.MaxTunnelsPerAgent,
 	})
 	mgmt.Handle("/dashboard", dash)
 	mgmt.Handle("/dashboard/", dash)
 	mgmt.Handle("/api/v1/admin/", dash)
+	mgmt.Handle("/api/v1/auth/", dash)
+	mgmt.Handle("/api/v1/me/", dash)
 	mgmt.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("mancar gateway\n"))
 	})
 
-	return &Server{cfg: cfg, log: d.Logger, domains: domains, hub: hub, recorder: recorder, counter: counter, handler: rt}
+	return &Server{cfg: cfg, log: d.Logger, domains: domains, hub: hub, recorder: recorder, counter: counter, handler: rt, dash: dash}
 }
 
 // Handler returns the public HTTP handler.
@@ -183,14 +199,19 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	go func() {
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
+		check := time.NewTicker(dashboard.RevokeCheck)
+		defer check.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-check.C:
+				s.dash.DropRevoked(ctx) // tokens revoked or accounts disabled from the CLI
 			case <-t.C:
 				if err := s.domains.Purge(ctx); err != nil && ctx.Err() == nil {
 					s.log.Warn("purging expired hostnames failed", "err", err)
 				}
+				s.dash.Housekeeping(ctx) // stale sign ups, old audit entries
 			}
 		}
 	}()

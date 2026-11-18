@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -18,7 +19,9 @@ import (
 )
 
 // Request inspector endpoints. Captures are decrypted here, in memory, only
-// for an authenticated admin; the database only ever holds ciphertext.
+// for a signed-in account; the database only ever holds ciphertext. Under
+// /api/v1/me (scopeUser) an account sees and changes only captures of its
+// own tunnels; another account's capture answers 404.
 
 func (d *Dashboard) inspectorOff(w http.ResponseWriter) bool {
 	if d.opts.Inspector == nil {
@@ -47,7 +50,7 @@ func (d *Dashboard) listRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	f := inspect.Filter{Hostname: strings.TrimSpace(q.Get("host")), Limit: 100}
+	f := inspect.Filter{Hostname: strings.TrimSpace(q.Get("host")), UserID: scopeUser(r), Limit: 100}
 	if v, err := strconv.Atoi(q.Get("limit")); err == nil {
 		f.Limit = v
 	}
@@ -134,6 +137,9 @@ func (d *Dashboard) getRequest(w http.ResponseWriter, r *http.Request) {
 
 func (d *Dashboard) loadCapture(w http.ResponseWriter, r *http.Request) (*inspect.Record, bool) {
 	row, err := d.opts.Inspector.Store().GetCapture(r.Context(), r.PathValue("id"))
+	if uid := scopeUser(r); err == nil && uid != "" && row.UserID != uid {
+		err = postgres.ErrNotFound // someone else's: indistinguishable from missing
+	}
 	if errors.Is(err, postgres.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not_found", "no such request (it may have expired)")
 		return nil, false
@@ -204,7 +210,7 @@ func (d *Dashboard) replayRequest(w http.ResponseWriter, r *http.Request) {
 	if rw.status == 0 {
 		rw.status = http.StatusOK
 	}
-	d.audit(r, "request.replay", "hostname", rec.Hostname, "method", rec.Method, "status", rw.status)
+	d.audit(r, "request.replay", rec.Hostname, fmt.Sprintf("%s %s → %d", rec.Method, rec.URI, rw.status))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": rw.status, "duration_ms": time.Since(start).Milliseconds(), "response_size": rw.n,
 	})
@@ -214,14 +220,40 @@ func (d *Dashboard) clearRequests(w http.ResponseWriter, r *http.Request) {
 	if d.inspectorOff(w) {
 		return
 	}
-	host := strings.TrimSpace(r.URL.Query().Get("host"))
-	n, err := d.opts.Inspector.Store().DeleteCaptures(r.Context(), host)
+	host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
+	var n int64
+	var err error
+	if uid := scopeUser(r); uid != "" {
+		n, err = d.clearOwnCaptures(r, uid, host)
+	} else {
+		n, err = d.opts.Inspector.Store().DeleteCaptures(r.Context(), host)
+	}
 	if err != nil {
 		d.internal(w, "delete captures", err)
 		return
 	}
-	d.audit(r, "requests.clear", "hostname", host, "deleted", n)
+	d.audit(r, "requests.clear", host, fmt.Sprintf("%d deleted", n))
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": n})
+}
+
+// userCaptureDeleter is implemented by *postgres.Store.
+type userCaptureDeleter interface {
+	DeleteUserCaptures(ctx context.Context, userID, hostname string) (int64, error)
+}
+
+// clearOwnCaptures deletes an account's captures, of one hostname or all.
+func (d *Dashboard) clearOwnCaptures(r *http.Request, uid, host string) (int64, error) {
+	if del, ok := d.opts.Inspector.Store().(userCaptureDeleter); ok {
+		return del.DeleteUserCaptures(r.Context(), uid, host)
+	}
+	// stores without per-user deletion: only hostnames the account holds
+	if host == "" {
+		return 0, nil
+	}
+	if own, err := d.ownsHost(r, uid, host); err != nil || !own {
+		return 0, err
+	}
+	return d.opts.Inspector.Store().DeleteCaptures(r.Context(), host)
 }
 
 // discardWriter receives a replayed response; the router's inspector has

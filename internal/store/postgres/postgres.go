@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq" // PostgreSQL driver
+	"github.com/lib/pq" // PostgreSQL driver
 
 	"github.com/tinoimammp/mancar/internal/auth"
 	"github.com/tinoimammp/mancar/internal/domain"
@@ -136,6 +136,7 @@ func (s *Store) EnsureUser(ctx context.Context, username string) (string, error)
 // TokenInfo describes a stored agent token (never the secret itself).
 type TokenInfo struct {
 	ID         string
+	UserID     string
 	Username   string
 	Name       string
 	CreatedAt  time.Time
@@ -158,7 +159,7 @@ func (s *Store) CreateAgentToken(ctx context.Context, userID, name string) (plai
 // ListAgentTokens returns all tokens, newest first.
 func (s *Store) ListAgentTokens(ctx context.Context) ([]TokenInfo, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT t.id, u.username, t.name, t.created_at, t.last_used_at, t.revoked_at
+		SELECT t.id, u.id, u.username, t.name, t.created_at, t.last_used_at, t.revoked_at
 		FROM agent_tokens t JOIN users u ON u.id = t.user_id ORDER BY t.created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -168,7 +169,7 @@ func (s *Store) ListAgentTokens(ctx context.Context) ([]TokenInfo, error) {
 	for rows.Next() {
 		var t TokenInfo
 		var used, revoked sql.NullTime
-		if err := rows.Scan(&t.ID, &t.Username, &t.Name, &t.CreatedAt, &used, &revoked); err != nil {
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Username, &t.Name, &t.CreatedAt, &used, &revoked); err != nil {
 			return nil, err
 		}
 		if used.Valid {
@@ -194,34 +195,80 @@ func (s *Store) RevokeAgentToken(ctx context.Context, id string) error {
 	return nil
 }
 
-// AuthenticateAgent implements auth.Authenticator.
+// RevokeUserTokens revokes every active token of a user and returns the IDs.
+func (s *Store) RevokeUserTokens(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.DB.QueryContext(ctx, `UPDATE agent_tokens SET revoked_at = now()
+		WHERE user_id::text = $1 AND revoked_at IS NULL RETURNING id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// UsableTokens returns which of ids still authenticate: not revoked, and
+// the account exists and is not disabled. The gateway uses it to drop
+// agents whose access was taken away by another process (mancard CLI).
+func (s *Store) UsableTokens(ctx context.Context, ids []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT t.id FROM agent_tokens t JOIN users u ON u.id = t.user_id
+		WHERE t.id::text = ANY($1) AND t.revoked_at IS NULL AND u.disabled_at IS NULL`, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// AuthenticateAgent implements auth.Authenticator. Tokens of a disabled
+// account are refused (and work again when it is enabled).
 func (s *Store) AuthenticateAgent(ctx context.Context, token string) (auth.Principal, error) {
 	var p auth.Principal
 	err := s.DB.QueryRowContext(ctx, `
-		UPDATE agent_tokens SET last_used_at = now()
-		WHERE token_hash = $1 AND revoked_at IS NULL
-		RETURNING id, user_id`, auth.HashToken(token)).Scan(&p.TokenID, &p.UserID)
+		UPDATE agent_tokens t SET last_used_at = now()
+		FROM users u
+		WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND u.id = t.user_id AND u.disabled_at IS NULL
+		RETURNING t.id, t.user_id`, auth.HashToken(token)).Scan(&p.TokenID, &p.UserID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return auth.Principal{}, auth.ErrInvalidToken
 	}
 	return p, err
 }
 
-// UserInfo summarises a user for the dashboard.
+// UserInfo summarises an account for the dashboard.
 type UserInfo struct {
-	ID           string
-	Username     string
-	CreatedAt    time.Time
-	ActiveTokens int
-	Domains      int
+	Account
+	ActiveTokens  int
+	Domains       int
+	CustomDomains int
 }
 
-// ListUsers returns every user with token and hostname counts, by name.
+// ListUsers returns every account with token and hostname counts, by name.
 func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT u.id, u.username, u.created_at,
+		SELECT `+accountCols+`,
 		       (SELECT count(*) FROM agent_tokens t WHERE t.user_id = u.id AND t.revoked_at IS NULL),
-		       (SELECT count(*) FROM domains d WHERE d.user_id = u.id)
+		       (SELECT count(*) FROM domains d WHERE d.user_id = u.id),
+		       (SELECT count(*) FROM domains d WHERE d.user_id = u.id AND d.kind = 'custom')
 		FROM users u ORDER BY u.username`)
 	if err != nil {
 		return nil, err
@@ -230,9 +277,11 @@ func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
 	var out []UserInfo
 	for rows.Next() {
 		var u UserInfo
-		if err := rows.Scan(&u.ID, &u.Username, &u.CreatedAt, &u.ActiveTokens, &u.Domains); err != nil {
+		a, err := scanAccount(rows, &u.ActiveTokens, &u.Domains, &u.CustomDomains)
+		if err != nil {
 			return nil, err
 		}
+		u.Account = a
 		out = append(out, u)
 	}
 	return out, rows.Err()
@@ -259,6 +308,7 @@ func (s *Store) DeleteUser(ctx context.Context, id string) error {
 // DomainInfo describes a hostname reservation.
 type DomainInfo struct {
 	Hostname  string
+	UserID    string
 	Username  string
 	Kind      string
 	Online    bool
@@ -268,7 +318,7 @@ type DomainInfo struct {
 // ListDomains returns every reserved hostname, by name.
 func (s *Store) ListDomains(ctx context.Context) ([]DomainInfo, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT d.hostname, u.username, d.kind, d.active_tunnel_id IS NOT NULL, d.hold_until
+		SELECT d.hostname, u.id, u.username, d.kind, d.active_tunnel_id IS NOT NULL, d.hold_until
 		FROM domains d JOIN users u ON u.id = d.user_id ORDER BY d.hostname`)
 	if err != nil {
 		return nil, err
@@ -277,7 +327,7 @@ func (s *Store) ListDomains(ctx context.Context) ([]DomainInfo, error) {
 	var out []DomainInfo
 	for rows.Next() {
 		var d DomainInfo
-		if err := rows.Scan(&d.Hostname, &d.Username, &d.Kind, &d.Online, &d.HoldUntil); err != nil {
+		if err := rows.Scan(&d.Hostname, &d.UserID, &d.Username, &d.Kind, &d.Online, &d.HoldUntil); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -289,90 +339,6 @@ func (s *Store) ListDomains(ctx context.Context) ([]DomainInfo, error) {
 // the name available to anyone at once.
 func (s *Store) ReleaseDomain(ctx context.Context, hostname string) error {
 	res, err := s.DB.ExecContext(ctx, `DELETE FROM domains WHERE hostname = $1 AND active_tunnel_id IS NULL`, hostname)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// ---- dashboard admins ---------------------------------------------------
-
-// Admin is a dashboard operator account.
-type Admin struct {
-	ID                string
-	Username          string
-	PasswordHash      string
-	PasswordChangedAt time.Time
-	LastLoginAt       *time.Time
-	CreatedAt         time.Time
-}
-
-const adminCols = `id, username, password_hash, password_changed_at, last_login_at, created_at`
-
-func scanAdmin(row interface{ Scan(...any) error }) (Admin, error) {
-	var a Admin
-	var last sql.NullTime
-	err := row.Scan(&a.ID, &a.Username, &a.PasswordHash, &a.PasswordChangedAt, &last, &a.CreatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Admin{}, ErrNotFound
-	}
-	if last.Valid {
-		a.LastLoginAt = &last.Time
-	}
-	return a, err
-}
-
-// SetAdmin creates an admin or replaces the password of an existing one.
-// Changing the password invalidates that admin's existing sessions.
-func (s *Store) SetAdmin(ctx context.Context, username, passwordHash string) (created bool, err error) {
-	err = s.DB.QueryRowContext(ctx, `
-		INSERT INTO admins (username, password_hash) VALUES ($1, $2)
-		ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_changed_at = now()
-		RETURNING xmax = 0`, strings.ToLower(strings.TrimSpace(username)), passwordHash).Scan(&created)
-	return created, err
-}
-
-// AdminByUsername looks an admin up for login.
-func (s *Store) AdminByUsername(ctx context.Context, username string) (Admin, error) {
-	return scanAdmin(s.DB.QueryRowContext(ctx, `SELECT `+adminCols+` FROM admins WHERE username = $1`,
-		strings.ToLower(strings.TrimSpace(username))))
-}
-
-// AdminByID looks an admin up for session validation.
-func (s *Store) AdminByID(ctx context.Context, id string) (Admin, error) {
-	return scanAdmin(s.DB.QueryRowContext(ctx, `SELECT `+adminCols+` FROM admins WHERE id::text = $1`, id))
-}
-
-// TouchAdminLogin records a successful login.
-func (s *Store) TouchAdminLogin(ctx context.Context, id string) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE admins SET last_login_at = now() WHERE id::text = $1`, id)
-	return err
-}
-
-// ListAdmins returns every admin, by name.
-func (s *Store) ListAdmins(ctx context.Context) ([]Admin, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT `+adminCols+` FROM admins ORDER BY username`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Admin
-	for rows.Next() {
-		a, err := scanAdmin(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
-}
-
-// DeleteAdmin removes an admin by username.
-func (s *Store) DeleteAdmin(ctx context.Context, username string) error {
-	res, err := s.DB.ExecContext(ctx, `DELETE FROM admins WHERE username = $1`, strings.ToLower(strings.TrimSpace(username)))
 	if err != nil {
 		return err
 	}
@@ -431,8 +397,8 @@ func (s *Store) ListCaptures(ctx context.Context, f inspect.Filter) ([]inspect.R
 		before = time.Now().Add(time.Hour)
 	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT `+captureCols+` FROM captured_requests
-		WHERE ($1 = '' OR hostname = $1) AND created_at < $2
-		ORDER BY created_at DESC LIMIT $3`, strings.ToLower(f.Hostname), before, f.Limit)
+		WHERE ($1 = '' OR hostname = $1) AND created_at < $2 AND ($4 = '' OR user_id::text = $4)
+		ORDER BY created_at DESC LIMIT $3`, strings.ToLower(f.Hostname), before, f.Limit, f.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -456,6 +422,17 @@ func (s *Store) GetCapture(ctx context.Context, id string) (inspect.Row, error) 
 // DeleteCaptures deletes the captures of one hostname, or all when empty.
 func (s *Store) DeleteCaptures(ctx context.Context, hostname string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx, `DELETE FROM captured_requests WHERE $1 = '' OR hostname = $1`, strings.ToLower(hostname))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// DeleteUserCaptures deletes one account's captures, of one hostname or all
+// of them when hostname is empty.
+func (s *Store) DeleteUserCaptures(ctx context.Context, userID, hostname string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM captured_requests WHERE user_id::text = $1 AND ($2 = '' OR hostname = $2)`,
+		userID, strings.ToLower(hostname))
 	if err != nil {
 		return 0, err
 	}
@@ -694,6 +671,24 @@ func (s *Store) UsageByUser(ctx context.Context) (map[string]UsageWindows, error
 // UNIQUE(hostname) constraint serialises concurrent claims, and the WHERE
 // clause on the conflict branch encodes the ownership rules.
 func (s *Store) Claim(ctx context.Context, c domain.Claim) (string, error) {
+	// A user with a custom subdomain limit may hold at most that many custom
+	// names (admins and accounts without a limit are not counted). The check
+	// is not part of the claim statement, so two concurrent claims can both
+	// pass it; the limit is a fair-use rule, not a security boundary.
+	if c.Kind == domain.KindCustom {
+		var over bool
+		err := s.DB.QueryRowContext(ctx, `
+			SELECT u.role = 'user' AND u.max_custom_domains IS NOT NULL AND u.max_custom_domains <= (
+				SELECT count(*) FROM domains d
+				WHERE d.user_id = u.id AND d.kind = 'custom' AND d.hostname <> $2)
+			FROM users u WHERE u.id::text = $1`, c.OwnerID, c.Hostname).Scan(&over)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		if over {
+			return "", domain.ErrLimitReached
+		}
+	}
 	var kind string
 	err := s.DB.QueryRowContext(ctx, `
 		INSERT INTO domains AS d (hostname, user_id, kind, active_tunnel_id, hold_until)

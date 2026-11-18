@@ -74,6 +74,7 @@ type Row struct {
 // Filter selects captures for listing.
 type Filter struct {
 	Hostname string    // "" = all
+	UserID   string    // "" = every user's
 	Before   time.Time // zero = newest
 	Limit    int
 }

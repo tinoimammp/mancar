@@ -24,7 +24,7 @@ func (c *captures) InsertCaptures(_ context.Context, rows []inspect.Row) error {
 func (c *captures) ListCaptures(_ context.Context, f inspect.Filter) ([]inspect.Row, error) {
 	var out []inspect.Row
 	for _, r := range c.rows {
-		if f.Hostname == "" || r.Hostname == f.Hostname {
+		if (f.Hostname == "" || r.Hostname == f.Hostname) && (f.UserID == "" || r.UserID == f.UserID) {
 			out = append(out, r)
 		}
 	}
@@ -58,12 +58,15 @@ func (r *replayTarget) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Write([]byte("done"))
 }
 
+// lastStore is the fake store of the latest setupInspector call.
+var lastStore *fakeStore
+
 func setupInspector(t *testing.T) (*dashboard.Dashboard, *captures, *replayTarget, *inspect.Sealer) {
 	t.Helper()
 	hash, _ := dashboard.HashPassword(password)
-	st := &fakeStore{admins: map[string]postgres.Admin{
-		"root": {ID: "a1", Username: "root", PasswordHash: hash, PasswordChangedAt: time.Now().Add(-time.Hour)},
-	}}
+	st := newFakeStore()
+	st.add(postgres.Account{ID: "a1", Username: "root", Role: postgres.RoleAdmin, PasswordHash: hash, PasswordChangedAt: time.Now().Add(-time.Hour)})
+	lastStore = st
 	sealer, _ := inspect.NewSealer(bytes.Repeat([]byte{1}, 32))
 	cs := &captures{}
 	rec := inspect.NewRecorder(inspect.Options{Store: cs, Sealer: sealer})
@@ -154,5 +157,29 @@ func TestUnknownRequestIs404(t *testing.T) {
 	c := login(t, d)
 	if rec := do(d, req{method: "GET", path: "/api/v1/admin/requests/" + inspect.NewID(), cookie: c}); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown id: %d", rec.Code)
+	}
+}
+
+func TestUsersSeeOnlyTheirOwnRequests(t *testing.T) {
+	d, cs, _, s := setupInspector(t)
+	st := lastStore
+	hash, _ := dashboard.HashPassword(password)
+	st.add(postgres.Account{ID: "u-tino", Username: "tino", PasswordHash: hash, PasswordChangedAt: time.Now().Add(-time.Hour)})
+	mine := addCapture(t, cs, s, &inspect.Record{UserID: "u-tino", Hostname: "mine.tunnel.example.com", Method: "GET", URI: "/a", Status: 200})
+	theirs := addCapture(t, cs, s, &inspect.Record{UserID: "a1", Hostname: "root.tunnel.example.com", Method: "GET", URI: "/secret", Status: 200})
+	c := loginAs(t, d, "tino", password)
+
+	list := do(d, req{method: "GET", path: "/api/v1/me/requests", cookie: c}).Body.String()
+	if !strings.Contains(list, mine) || strings.Contains(list, theirs) || strings.Contains(list, "/secret") {
+		t.Errorf("list: %s", list)
+	}
+	if rec := do(d, req{method: "GET", path: "/api/v1/me/requests/" + theirs, cookie: c}); rec.Code != http.StatusNotFound {
+		t.Errorf("reading someone else's request: %d", rec.Code)
+	}
+	if rec := do(d, req{method: "POST", path: "/api/v1/me/requests/" + theirs + "/replay", cookie: c, csrf: true}); rec.Code != http.StatusNotFound {
+		t.Errorf("replaying someone else's request: %d", rec.Code)
+	}
+	if rec := do(d, req{method: "GET", path: "/api/v1/me/requests/" + mine, cookie: c}); rec.Code != http.StatusOK {
+		t.Errorf("own request: %d", rec.Code)
 	}
 }

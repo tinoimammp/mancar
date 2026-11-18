@@ -35,6 +35,9 @@ var (
 	ErrInvalidLabel = errors.New("domain: invalid subdomain")
 	// ErrExhausted means no free random hostname could be found.
 	ErrExhausted = errors.New("domain: could not allocate a random hostname")
+	// ErrLimitReached means the owner holds as many custom hostnames as
+	// their account allows.
+	ErrLimitReached = errors.New("domain: custom subdomain limit reached")
 )
 
 // Claim is one reservation request.
