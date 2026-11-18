@@ -7,6 +7,88 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 
 ## [Unreleased]
 
+## [v0.7.0] - 2026-11-18
+
+### Added
+- **PgBouncer** between the gateway and PostgreSQL (transaction pooling;
+  `PGBOUNCER_POOL_SIZE`, default 10 server connections). Migrations now take a
+  transaction-level lock so they work behind it, and CI runs the database
+  tests through PgBouncer too. Backups and restores still use PostgreSQL
+  directly.
+
+### Security
+- A dashboard replay could reach another account's private tunnel when the
+  hostname had changed hands since the capture. A replay now only goes to a
+  tunnel of the account that recorded it.
+- `--allow` by email address could let in someone who signed up with that
+  address without confirming it. Only active accounts with a confirmed email
+  can be shared with.
+- A `#ref=` link to the dashboard could send a person who just signed in to
+  any app under the base domain (phishing). It now leads only to a tunnel the
+  account may open, or to a private tunnel's Restricted page. A tunnel shared
+  with you opens on a click, without the countdown.
+- `mancard admin set NAME` no longer promotes an account made by web sign up
+  (its email address could reset the new admin's password).
+- Demoting or deleting the last admin no longer reopens the public first-run
+  setup page; only a server where no account has a password offers it.
+- Creating an admin, giving another admin a temporary password and changing
+  another admin's email now ask for your own password.
+- An agent can no longer hold gateway memory with streams it never uses, nor
+  flood the control channel (over 120 messages in 10 s disconnects it).
+- Request paths and server messages are cleaned of control characters before
+  `mancar` prints them (no terminal escape injection by visitors).
+- `X-Real-IP`, `True-Client-IP`, `CF-Connecting-IP` and similar headers sent
+  by visitors are removed; `X-Real-IP` carries the real address.
+- `mancar login` only opens a web link on the server it asked.
+- Disabling or deleting an account, or a new password, ends its access to
+  private tunnels at once, not only its dashboard sessions.
+- Logins count against the limit before the password is checked, failures
+  for one account from other addresses no longer lock it out, and an IPv6
+  /64 counts as one address. A password reset is rate limited before hashing.
+- "Forgot password" and "send again" answer before looking the address up,
+  so response times do not show whether it is registered.
+- The release workflow pins every action to a commit and gives each job only
+  the permissions it needs.
+- `JWT_SECRET` is required whenever PostgreSQL is used, also in development.
+- `/api/v1/system/health` shows details only to direct requests from inside
+  the deployment, never to anything that came through the edge.
+
+### Fixed
+- `docker-compose.yml` now passes `INSPECT*`, `REGISTER_ENABLED`, `SMTP_URL`,
+  `TRUSTED_PROXIES` and the new `MAX_TCP_TUNNELS_PER_USER` to the gateway;
+  before, these settings in `.env` were ignored (sign up and password reset
+  could not work).
+- The compose file no longer builds images: a version that does not exist
+  makes `docker compose pull` fail instead of compiling on the server.
+  Upgrade with `docker compose pull && docker compose up -d --wait`.
+- One account can hold at most `MAX_TCP_TUNNELS_PER_USER` (10) TCP tunnels,
+  so it cannot take the whole port range.
+- `scripts/restore.sh` restores in one transaction: a failed restore changes
+  nothing.
+- Abandoned sign ups are purged only when they never signed in and were not
+  changed for a week; an admin changing an address no longer gets an account
+  in use deleted.
+- An emailed password reset by an admin now signs the account out, as stated.
+- A device approved twice at once no longer leaves an undelivered token.
+- A hostname whose reservation timed out is released instead of staying
+  blocked until the next restart.
+- `mancar update` allows slow downloads (only the wait for an answer is
+  limited to a minute).
+- `mancard user` and `admin` commands no longer upgrade a database the
+  running gateway still uses; they prepare a new database only.
+
+### Upgrading
+- **Update `docker-compose.yml` first** (`git pull` in the server's mancar
+  folder): it adds PgBouncer, passes the missing settings and no longer
+  builds images. Then `docker compose pull && docker compose up -d --wait`.
+  `docker compose ps` should show postgres, pgbouncer, gateway and caddy.
+- Settings in `.env` that were ignored before now apply (`INSPECT*`,
+  `REGISTER_ENABLED`, `SMTP_URL`, `TRUSTED_PROXIES`): check them.
+- An account may hold at most 10 TCP tunnels (`MAX_TCP_TUNNELS_PER_USER`).
+- `JWT_SECRET` is required with PostgreSQL also when `APP_ENV=development`.
+- A pinned `MANCAR_VERSION` is written without "v" (`0.7.0`).
+- No database migration; agents reconnect by themselves.
+
 ## [v0.6.0] - 2026-11-18
 
 ### Added
@@ -232,6 +314,7 @@ First release.
   rate limiting.
 - Built with Go 1.26.11.
 
+[v0.7.0]: https://github.com/tinoimammp/mancar/compare/v0.6.0...v0.7.0
 [v0.6.0]: https://github.com/tinoimammp/mancar/compare/v0.5.1...v0.6.0
 [v0.5.1]: https://github.com/tinoimammp/mancar/compare/v0.5.0...v0.5.1
 [v0.5.0]: https://github.com/tinoimammp/mancar/compare/v0.4.0...v0.5.0
