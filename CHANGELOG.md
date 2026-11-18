@@ -5,6 +5,53 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 `mancard` gateway for Linux, and the Docker images
 `ghcr.io/tinoimammp/mancar` and `ghcr.io/tinoimammp/mancar-edge`.
 
+## [Unreleased]
+
+### Added
+- Accounts with two roles. **Admins** see and manage the whole gateway;
+  **users** sign in to see only their own tunnels, subdomains, tokens and
+  captured requests, and manage their account (password, delete).
+- Optional sign up from the web, off by default:
+  ```bash
+  REGISTER_ENABLED=true
+  SMTP_URL=smtps://user:password@smtp.example.com:465
+  ```
+  New accounts confirm their email before they can create tokens, and get 3
+  active tokens and 3 custom subdomains. Unconfirmed sign ups are deleted
+  after 7 days. Sign up, "send again" and "forgot password" answer the same
+  whether an address is registered or not.
+- **Forgot password** on the sign in page when `SMTP_URL` is set.
+- User management for admins: search and filter by role or status, add a
+  user, make admin (asks for your password) or user, disable / enable,
+  confirm an email, reset a password (by email or a temporary one), revoke
+  all tokens, change limits. The last active admin cannot be removed, and
+  nobody can demote or disable themselves.
+- **Activity** page: what admins and users did, kept for a year.
+- A new gateway asks for the **first admin in the dashboard**: no command on
+  the server is needed. The page closes for good once an admin exists.
+- Sign in with your email or your username.
+- **`mancar login https://YOUR_DOMAIN`**: no more copying tokens. The
+  browser opens the dashboard, you check the code and click Allow, and a
+  token named after the computer is saved. `--name` sets another name,
+  `--no-browser` only prints the link.
+- `mancard user list|create|password|role|disable|enable|delete` manage
+  accounts on the server, and `mancard help` is grouped by topic. For
+  example, `mancard user password NAME` resets a password without changing
+  the role.
+
+### Changed
+- Dashboard admins and users are now one list of accounts. Upgrading moves
+  every admin into it; an admin and a user with the same name become one
+  admin account that keeps the user's tokens. Open sessions must sign in
+  again once.
+- `mancard admin set|list|delete` still work; `admin delete NAME` now takes
+  admin rights away and keeps the account as a user.
+- Tokens of a disabled account are refused until it is enabled again.
+- Agents connected with a token that was revoked, or whose account was
+  disabled or deleted, from the CLI are now dropped within 30 seconds
+  instead of staying connected until they reconnect.
+- The logo is now an image, also used as the browser icon.
+
 ## [v0.3.3] - 2026-11-17
 
 ### Changed

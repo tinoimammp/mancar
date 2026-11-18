@@ -31,7 +31,7 @@ internet ──▶ Caddy (TLS) ──▶ gateway ──▶ agent ──▶ local
 * The CLI keeps the token in `config.json` (mode `0600`, directory `0700`) or in `MANCAR_TOKEN`. It deliberately has **no `--token` flag**: command lines leak through shell history and process lists.
 * Malformed tokens are rejected before any database access. Revoked and unknown tokens are indistinguishable to the client.
 * **Failed-login rate limiting:** each client address (the real one behind the edge, not the proxy's) may fail `AUTH_FAILURE_LIMIT_PER_MINUTE` times per minute (default 10). Beyond that the request is answered `429` without a database lookup. One abusive client does not lock out others behind the same proxy.
-* Revocation stops new connections immediately; sessions that are already connected continue until they reconnect (see [OPERATIONS.md](OPERATIONS.md)).
+* Revocation stops new connections immediately; agents that are already connected are dropped within 30 seconds, or at once when revoked from the dashboard (see [OPERATIONS.md](OPERATIONS.md)).
 
 ### Dashboard
 

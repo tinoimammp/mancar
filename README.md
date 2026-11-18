@@ -39,6 +39,9 @@ There are two programs:
 | Dashboard | Live clients and tunnels, disconnect a client | ✅ |
 | | Create and revoke tokens (revoke disconnects at once) | ✅ |
 | | Manage users and reserved hostnames | ✅ |
+| | Accounts with two roles: admins see everything, users only their own tunnels | ✅ |
+| | Sign up on the web with email confirmation, forgot password (optional) | ✅ |
+| | Disable, promote, limit and reset accounts; activity log | ✅ |
 | | Traffic per hostname and user: 24 h, 7 days and all time (requests, errors, bytes) | ✅ |
 | | Request inspector and replay (stored encrypted, auto-deleted) | ✅ |
 | Security | Per-user tokens, stored only as hashes | ✅ |
@@ -98,11 +101,18 @@ docker compose up -d
 
 ### 4. Create a dashboard admin
 
+Open `https://YOUR_DOMAIN/dashboard/` right after the gateway starts: a new
+gateway asks you to **create the first admin** there. Do it straight away, since
+until then whoever opens the page first becomes the admin. On the server you
+can always do it (or take it back) instead:
+
 ```bash
-docker compose exec gateway /mancard admin set --user admin
+docker compose exec gateway /mancard user create admin --admin
 ```
 
-The password is printed once. Open `https://YOUR_DOMAIN/dashboard/` and log in.
+That password is printed once (forgot it? `mancard user password admin`).
+To let people create their own account, set `REGISTER_ENABLED=true` and
+`SMTP_URL` (see [docs/OPERATIONS.md](docs/OPERATIONS.md#sign-up-from-the-web)).
 
 ### 5. Give someone access
 
@@ -163,6 +173,16 @@ prints a one-line notice; running tunnels look for one once a day and
 `mancar version` checks right away. `MANCAR_NO_UPDATE_CHECK=1` turns this off.
 
 ### 2. Connect to your server
+
+```bash
+mancar login https://YOUR_DOMAIN
+```
+
+Your browser opens the dashboard: sign in, check that the code matches the
+one in your terminal, and click **Allow**. A token named after your computer
+is created and saved. Revoke it any time under **Tokens**.
+
+With a token you already have (no browser, e.g. on a server):
 
 ```bash
 mancar config set server https://YOUR_DOMAIN

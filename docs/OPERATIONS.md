@@ -25,20 +25,66 @@ A database outage turns this into HTTP 503 with `"status":"degraded"`.
 ## Dashboard
 
 The dashboard is served at `https://BASE_DOMAIN/dashboard/` (PostgreSQL storage
-only). It shows connected agents and their tunnels and manages users, tokens
-and hostname reservations. Admin accounts are managed on the server:
+only). Accounts have one of two roles:
+
+| Role | Sees and manages |
+|---|---|
+| `admin` | the whole gateway: agents, tunnels, requests, every account, tokens, hostnames, the audit log |
+| `user` | only their own tunnels, subdomains, tokens and requests, and their account |
+
+The first admin is made on the server; more can be promoted in the dashboard
+(Users → a user → Make admin, which asks for your own password) or on the
+server. Every account command (`docker compose exec gateway /mancard ...`):
 
 ```bash
-docker compose exec gateway /mancard admin set --user admin      # create, or reset the password
-echo 'my long passphrase' | docker compose exec -T gateway /mancard admin set --user admin --password-stdin
-docker compose exec gateway /mancard admin list
-docker compose exec gateway /mancard admin delete admin
+mancard user list                                  # every account: role, email, status, last sign in
+mancard user create admin --admin                  # first admin; prints a generated password
+mancard user create rina --email rina@example.com  # a plain user
+mancard user password rina                         # new password, role unchanged
+mancard user role rina admin                       # or: user
+mancard user disable rina                          # block sign in, refuse tokens; enable undoes it
+mancard user delete rina                           # with tokens, subdomains, requests, statistics
+mancard help                                       # everything else
+```
+
+To choose the password yourself, pipe it in:
+
+```bash
+echo 'my long passphrase' | docker compose exec -T gateway /mancard user password admin --password-stdin
 ```
 
 Without `--password-stdin` a random password is generated and printed once.
-Resetting a password or deleting an admin signs their sessions out at once.
-Sessions last 12 hours. Every dashboard change is logged as
-`dashboard action` with the admin's name and client address.
+The older `mancard admin set|list|delete` commands still work.
+Resetting a password, disabling or deleting an account signs its sessions
+out at once, and a role change applies to open sessions immediately. An
+admin cannot demote, disable or delete themselves, and the gateway always
+keeps at least one active admin. Sessions last 12 hours. Admin actions are
+listed in the dashboard (Activity) for a year and logged as `dashboard action`.
+
+### Sign up from the web
+
+Off by default. To let people create their own account:
+
+```bash
+REGISTER_ENABLED=true
+SMTP_URL=smtps://user:password@smtp.example.com:465   # or smtp://...:587 (STARTTLS)
+```
+
+Emails are sent from `no-reply@BASE_DOMAIN`. URL-encode special characters in
+the password (`@` is `%40`). `SMTP_URL` alone (sign up off) still enables
+"Forgot password" and reset links sent by an admin.
+
+- A new account must confirm its email (link valid 24 hours) before it can
+  create tokens. Unconfirmed sign ups are deleted after 7 days.
+- Privacy: sign up, "send again" and "forgot password" answer the same
+  whether an address is registered or not. The owner of a registered address
+  gets an email saying someone tried to sign up with it.
+- A signed-up account may have 3 active tokens and 3 custom subdomains;
+  admins change this per account (Users → Limits). Admins have no limits.
+- Disabling an account refuses its tokens and disconnects its agents; enabling
+  it makes the same tokens work again.
+- Each client may trigger 5 emails an hour, and each address receives at most
+  3 an hour.
 
 ## Traffic statistics
 
@@ -86,10 +132,9 @@ docker compose exec gateway /mancard token revoke <ID>
 ```
 
 * The token is shown **once** and stored only as a SHA-256 hash. Lost token: revoke it and create another.
-* Revocation stops **new** connections immediately. An agent that is already
-  connected stays connected until it reconnects. To cut it off at once, restart
-  the gateway (`docker compose restart gateway`): every agent reconnects within
-  seconds and keeps its hostnames, except the revoked one, which is refused.
+* Revocation stops new connections immediately. An agent that is already
+  connected is dropped within 30 seconds (from the dashboard: at once). The
+  same goes for `mancard user disable` and `mancard user delete`.
 * Remove a user and everything they own (tokens, hostnames):
 
   ```bash
