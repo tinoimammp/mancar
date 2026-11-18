@@ -49,6 +49,7 @@ There are two programs:
 | | Limits on tunnels, connections, request size; failed-login lockout | ✅ |
 | | Dashboard: hashed passwords, signed cookies, CSRF protection, strict CSP | ✅ |
 | | Private tunnels: only the owner opens them, after signing in (`--private`) | ✅ |
+| | Share a private tunnel with other accounts (`--allow budi,ana`) | ✅ |
 | | Basic auth / IP rules in front of a tunnel | ❌ |
 
 ✅ available · ❌ not yet. Details: [docs/STATUS.md](docs/STATUS.md).
@@ -199,12 +200,15 @@ mancar http 3000                      # asks: random, custom, or one of your las
 mancar http 3000 --last               # reuse the name you used most recently
 mancar tcp 5432                       # raw TCP, e.g. a database -> YOUR_DOMAIN:200xx
 mancar http 3000 --private            # only you can open it (see below)
+mancar http 3000 --allow budi,ana     # private, and budi and ana may open it too
 ```
 
 **Private tunnels.** With `--private`, a visitor sees a **Restricted** page
 with a **Log in to continue** button. After logging in on the dashboard, the
 account that owns the tunnel is sent on to it; anyone else lands on the
-Restricted page again. Access lasts 12 hours per browser and tunnel. Good for
+Restricted page again. `--allow` shares it with other accounts on the server
+(usernames or email addresses, comma separated; it implies `--private`). An
+unknown name stops `mancar` with "no account: NAME". Access lasts 12 hours per browser and tunnel. Good for
 admin panels and work in progress. It works for HTTP tunnels on servers with
 the dashboard (PostgreSQL). Requests without a browser (curl, webhooks) get
 `401`, so use a normal tunnel for those.
