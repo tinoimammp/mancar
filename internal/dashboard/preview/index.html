@@ -11,6 +11,9 @@
   Theme: ?theme=light | ?theme=dark | (none) follows the system.
   Role: ?as=admin (default) | user | unverified | guest (sign in and sign up)
   | setup (a fresh gateway: create the first admin).
+  Private tunnel: "Open" on lunar-panther (Tunnels) shows the Restricted
+  page a signed-out visitor gets. "Log in to continue": as tino (the owner)
+  you get in, as admin you are back on the Restricted page.
   ?click=N opens the Nth clickable row, e.g. a detail sheet.
 -->
 <script src="mock.js"></script>
@@ -38,16 +41,43 @@
   <a href="?as=unverified">unverified</a>
   <a href="?as=guest">sign in / up</a>
   <a href="?as=setup">first run</a>
+  · private tunnel:
+  <a href="restricted.html">restricted</a>
+  <a href="?as=guest#ref=lunar-panther.labsdigitalside.my.id%2F">log in</a>
+  <a href="?as=user#ref=lunar-panther.labsdigitalside.my.id%2F">allowed</a>
   · theme:
   <a href="?theme=light">light</a>
   <a href="?theme=dark">dark</a>
 </nav>
 <script>
-  // keep the other preview setting when switching one (as=… keeps theme, and back)
-  document.querySelectorAll(".preview-bar a").forEach((a) => {
+  // Switching one preview setting keeps the other (as=… keeps theme, and
+  // back) and the open page (#tunnels); a link with its own #… uses that.
+  // Worked out on click, so it follows the page as it is now, and the same
+  // address reloads instead of doing nothing.
+  function previewTarget(a) {
+    const link = new URL(a.getAttribute("href"), location.href);
+    if (link.pathname !== location.pathname) return link.href; // another preview page
     const next = new URLSearchParams(location.search);
-    for (const [k, v] of new URL(a.href).searchParams) next.set(k, v);
-    a.href = "?" + next + location.hash;
+    for (const [k, v] of link.searchParams) next.set(k, v);
+    const view = /^#[a-z]+$/.test(location.hash) ? location.hash : "";
+    return location.pathname + "?" + next + (link.hash || view);
+  }
+  // There is no real tunnel behind the preview: "Open" on the private one
+  // shows the Restricted page the gateway gives a signed-out visitor.
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest('a[href^="https://lunar-panther."]');
+    if (!a) return;
+    e.preventDefault();
+    location.assign("restricted.html?host=" + encodeURIComponent(new URL(a.href).host));
+  }, true); // capture: the Open button stops the click from reaching its row
+  document.querySelector(".preview-bar").addEventListener("click", (e) => {
+    const a = e.target.closest("a");
+    if (!a) return;
+    e.preventDefault();
+    const url = previewTarget(a);
+    if (url === location.pathname + location.search + location.hash) location.reload();
+    else if (url.split("#")[0] === location.pathname + location.search) location.hash = url.split("#")[1] || "";
+    else location.assign(url);
   });
 </script>
 <style>

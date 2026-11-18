@@ -25,6 +25,8 @@ const state = {
   userShow: "all", // users page: role / status filter
   pages: {}, // current page per paginated list
   pendingDevice: null, // a "mancar login" code from #device=, shown after sign in
+  pendingAccess: null, // "host/path" of a private tunnel from #ref=, opened after sign in
+  freshLogin: false, // signed in on this page just now (not an older session)
   search: {}, // search text per list page (tokens, users, domains)
 };
 
@@ -163,8 +165,59 @@ function signIn(s) {
   state.role = s.role === "user" ? "user" : "admin";
   state.data = {};
   if (!(state.view in views())) state.view = "overview";
+  if (state.pendingAccess) return openAccess(); // leaves for the tunnel
   renderShell();
   if (state.pendingDevice) deviceDialog();
+}
+
+// openAccess: a private tunnel's Restricted page sent the browser to sign
+// in with #ref=HOST/PATH. Once signed in it goes back: with a one-time
+// ticket if this account owns the tunnel, otherwise to the Restricted page.
+async function openAccess() {
+  const target = state.pendingAccess;
+  const fresh = state.freshLogin;
+  state.pendingAccess = null;
+  state.freshLogin = false;
+  const host = target.split(/[/?]/)[0];
+  try {
+    const r = await api("POST", own("/access"), { target });
+    if (r.allowed) accessGranted(host, r.url);
+    else if (fresh) location.replace(r.url); // just logged in, still no access: the Restricted page again
+    else {
+      // came signed in with an account that has no access: let them switch
+      state.pendingAccess = target;
+      renderLogin(`You are signed in as ${state.user}, which has no access to ${host}. Log in with another account.`);
+    }
+  } catch (e) {
+    // not a tunnel of this server: just the dashboard
+    history.replaceState(null, "", location.pathname);
+    signIn({ username: state.user, role: state.role });
+    toast(e.message);
+  }
+}
+
+// accessGranted: the owner is let in; the tunnel opens after a short
+// countdown, or at once with the button. (The ticket in url lasts a minute.)
+function accessGranted(host, url) {
+  let left = 5;
+  const note = h("p", { class: "auth-note" });
+  const tick = () => {
+    note.replaceChildren(left > 0 ? `Opening ${host} in ${left} s…` : `Opening ${host}…`);
+    if (left-- <= 0) {
+      clearInterval(timer);
+      location.replace(url);
+    }
+  };
+  const timer = setInterval(tick, 1000);
+  authPage(
+    "Private tunnel",
+    h("div", { class: "check-email" }, h("span", { class: "check-icon ok", "aria-hidden": "true" }, icon("check")), h("h1", { class: "check-title" }, "Access granted"), note),
+    h("div", { class: "form" }, button("Open now", () => {
+      clearInterval(timer);
+      location.replace(url);
+    }, { kind: "primary" })),
+  );
+  tick();
 }
 
 // deviceDialog: "mancar login" in a terminal waits for this. It shows the
@@ -278,7 +331,9 @@ function renderLogin(message) {
   const pass = passwordInput();
   const form = busyForm([h("label", {}, "Email or username", user), h("label", {}, "Password", pass)], "Log in", async () => {
     try {
-      signIn(await api("POST", "/login", { username: user.value, password: pass.value }));
+      const s = await api("POST", "/login", { username: user.value, password: pass.value });
+      state.freshLogin = true;
+      signIn(s);
     } catch (e) {
       pass.value = "";
       pass.focus();
@@ -486,6 +541,22 @@ function renderReset(secret) {
 // openLink: a "#verify=…" or "#reset=…" link from an email. The secret is
 // removed from the address bar at once so it does not stay in history.
 async function openLink() {
+  // a private tunnel opens #ref=HOST/PATH: the usual sign in page, then on
+  // to the tunnel. The ref stays in the address bar until then.
+  const acc = location.hash.match(/^#ref=(.{3,2000})$/);
+  if (acc) {
+    let target = "";
+    try {
+      target = decodeURIComponent(acc[1]);
+    } catch {}
+    if (!/^[a-z0-9.-]+(?:[/?].*)?$/i.test(target)) {
+      history.replaceState(null, "", location.pathname);
+      return false;
+    }
+    state.pendingAccess = target;
+    if (state.user) openAccess();
+    return state.user ? "access" : false; // signed out: start() signs in first
+  }
   // "mancar login" opens #device=CODE: ask to allow it once signed in
   const dev = location.hash.match(/^#device=([A-Za-z0-9-]{8,9})$/);
   if (dev) {
@@ -699,6 +770,7 @@ const ICONS = {
   shield: "M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z",
   left: "M15 18l-6-6 6-6",
   right: "M9 18l6-6-6-6",
+  lock: "M5 11h14v10H5zM8 11V7a4 4 0 0 1 8 0v4",
 };
 
 function icon(name) {
@@ -1127,10 +1199,10 @@ function renderOverview(o) {
 function tunnelCell(t, subtitle) {
   const isHTTP = t.proto === "http";
   return cell({
-    avatar: isHTTP ? "link" : "terminal",
+    avatar: t.private ? "lock" : isHTTP ? "link" : "terminal",
     title: t.public_url.replace(/^https?:\/\//, ""),
     mono: true,
-    subtitle: [t.proto.toUpperCase(), subtitle, t.active_connections ? `${t.active_connections} open` : null].filter(Boolean).join(" · "),
+    subtitle: [t.proto.toUpperCase(), t.private ? "Private" : null, subtitle, t.active_connections ? `${t.active_connections} open` : null].filter(Boolean).join(" · "),
     trailing: h(
       "span",
       { class: "row" },
@@ -1959,7 +2031,7 @@ function renderMyTunnels(o) {
     group(
       "Online",
       o.tunnels.length ? o.tunnels.map((t) => tunnelCell(t, "since " + ago(t.created_at).replace(" ago", ""))) : empty("No tunnel is online. Start one with: mancar http 3000"),
-      null,
+      "With --private, visitors must log in first and only you get in.",
       total(o.tunnels.length),
     ),
     group(null, h("div", { class: "card toolbar" }, searchBox("my-domains", "Search your subdomains"))),
@@ -2063,7 +2135,7 @@ window.addEventListener("hashchange", async () => {
   // an email link opened in a tab that already shows the dashboard
   const link = await openLink();
   if (link) {
-    if (link !== "device") stopRefresh(); // verify/reset replace the page; a device sheet does not
+    if (link !== "device") stopRefresh(); // verify/reset/access replace the page; a device sheet does not
     return;
   }
   const v = location.hash.slice(1);

@@ -2,12 +2,16 @@ package dashboard_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tinoimammp/mancar/internal/access"
 	"github.com/tinoimammp/mancar/internal/dashboard"
 	"github.com/tinoimammp/mancar/internal/gateway"
 	"github.com/tinoimammp/mancar/internal/store/postgres"
@@ -497,5 +501,78 @@ func TestDropRevokedAgents(t *testing.T) {
 	}
 	if len(hub.live) != 1 || hub.live[0].ID != "s1" {
 		t.Errorf("still connected: %+v", hub.live)
+	}
+}
+
+func TestPrivateTunnelAccess(t *testing.T) {
+	_, st, _ := setupAccounts(t)
+	k := access.New("secret", true)
+	hub := &sessionHub{live: []gateway.SessionInfo{
+		{ID: "s1", UserID: "u-tino", Tunnels: []gateway.TunnelInfo{
+			{Proto: "http", Hostname: "app.tunnel.example.com", PublicURL: "https://app.tunnel.example.com", Private: true},
+			{Proto: "http", Hostname: "open.tunnel.example.com", PublicURL: "https://open.tunnel.example.com"},
+		}},
+		{ID: "s2", UserID: "a1", Tunnels: []gateway.TunnelInfo{
+			{Proto: "http", Hostname: "root.tunnel.example.com", PublicURL: "https://root.tunnel.example.com", Private: true},
+		}},
+	}}
+	d := dashboard.New(dashboard.Options{Store: st, Hub: hub, SessionSecret: strings.Repeat("s", 32), Secure: true,
+		BaseDomain: "tunnel.example.com", PublicScheme: "https", Access: k})
+	c := loginAs(t, d, "tino", password)
+	ask := func(target string, csrf bool) (int, map[string]any) {
+		rec := do(d, req{method: "POST", path: "/api/v1/me/access", body: `{"target":"` + target + `"}`, cookie: c, csrf: csrf})
+		var out map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+
+	code, out := ask("app.tunnel.example.com/x?y=1", true)
+	if code != http.StatusOK {
+		t.Fatalf("own private tunnel: %d %v", code, out)
+	}
+	u, err := url.Parse(out["url"].(string))
+	if err != nil || u.Host != "app.tunnel.example.com" || u.Path != access.Path || u.Query().Get("next") != "/x?y=1" {
+		t.Fatalf("url = %v", out["url"])
+	}
+	if out["allowed"] != true {
+		t.Errorf("allowed = %v", out["allowed"])
+	}
+	if user, ok := k.Redeem(u.Query().Get("ticket"), "app.tunnel.example.com"); !ok || user != "u-tino" {
+		t.Errorf("ticket: %q %v", user, ok)
+	}
+	if code, out := ask("open.tunnel.example.com//evil.com", true); code != http.StatusOK || out["url"] != "https://open.tunnel.example.com/" {
+		t.Errorf("own public tunnel: %d %v", code, out)
+	}
+	// someone else's tunnel looks exactly like one that is offline: back
+	// to the plain address (the Restricted page), no ticket
+	codeOther, other := ask("root.tunnel.example.com/a", true)
+	codeOff, off := ask("gone.tunnel.example.com/a", true)
+	if codeOther != http.StatusOK || other["url"] != "https://root.tunnel.example.com/a" || other["allowed"] != false ||
+		codeOff != http.StatusOK || strings.Replace(fmt.Sprint(other), "root", "gone", 1) != fmt.Sprint(off) {
+		t.Errorf("another account's tunnel: %d %v / offline: %d %v", codeOther, other, codeOff, off)
+	}
+	// never a redirect off this server
+	for _, target := range []string{"evil.com/", "tunnel.example.com/", "x.tunnel.example.com.evil.com/", "a_b.tunnel.example.com/"} {
+		if code, out := ask(target, true); code != http.StatusNotFound {
+			t.Errorf("target %q: %d %v", target, code, out)
+		}
+	}
+	if code, _ := ask("app.tunnel.example.com/", false); code != http.StatusForbidden {
+		t.Errorf("without CSRF header: %d", code)
+	}
+}
+
+func TestRestrictedPage(t *testing.T) {
+	rec := httptest.NewRecorder()
+	dashboard.RestrictedPage(rec, `app.tunnel.example.com"><script>`, `https://tunnel.example.com/dashboard/#ref=app.tunnel.example.com%2F`)
+	body := rec.Body.String()
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
+		t.Errorf("status %d, CSP %q", rec.Code, rec.Header().Get("Content-Security-Policy"))
+	}
+	if strings.Contains(body, "<script>") || !strings.Contains(body, "Log in to continue") ||
+		!strings.Contains(body, `href="https://tunnel.example.com/dashboard/#ref=app.tunnel.example.com%2F"`) ||
+		!strings.Contains(body, `url("https://tunnel.example.com/dashboard/logo.webp")`) ||
+		!strings.Contains(rec.Header().Get("Content-Security-Policy"), "img-src https://tunnel.example.com;") {
+		t.Errorf("body:\n%s", body)
 	}
 }

@@ -11,8 +11,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
+	"github.com/tinoimammp/mancar/internal/access"
 	"github.com/tinoimammp/mancar/internal/auth"
 	"github.com/tinoimammp/mancar/internal/config"
 	"github.com/tinoimammp/mancar/internal/dashboard"
@@ -76,7 +78,14 @@ func New(d Deps) *Server {
 		MaxTunnelsPerSession: cfg.MaxTunnelsPerAgent, MaxSessionsPerUser: cfg.MaxAgentsPerUser,
 		MaxConnsPerTunnel: cfg.MaxConnsPerTunnel, KeepAliveInterval: d.KeepAlive, Logger: d.Logger,
 		TrustedProxies: cfg.TrustedProxies, AuthFailureLimit: authFailureLimit(cfg), AuthFailureWindow: time.Minute,
+		PrivateTunnels: d.Admin != nil,
 	})
+	// Private tunnels sign visitors in through the dashboard, so they need
+	// accounts (PostgreSQL).
+	var keeper *access.Keeper
+	if d.Admin != nil {
+		keeper = access.New(cfg.JWTSecret, cfg.PublicScheme == "https")
+	}
 
 	mgmt := http.NewServeMux()
 	mgmt.Handle(protocol.ConnectPath, hub)
@@ -131,6 +140,11 @@ func New(d Deps) *Server {
 	ropts := router.Options{
 		BaseDomain: cfg.BaseDomain, Tunnels: hub, Management: mgmt, TrustedProxies: cfg.TrustedProxies,
 		MaxBodyBytes: cfg.MaxRequestBodyBytes, ResponseHeaderTimeout: cfg.ResponseHeaderTimeout, Logger: d.Logger,
+		Access: keeper,
+		SignInURL: func(target string) string {
+			return cfg.PublicURL(cfg.BaseDomain) + "/dashboard/#ref=" + url.PathEscape(target)
+		},
+		Restricted: dashboard.RestrictedPage,
 	}
 	if recorder != nil {
 		ropts.Inspector = recorder
@@ -156,7 +170,7 @@ func New(d Deps) *Server {
 		BaseDomain: cfg.BaseDomain, PublicScheme: cfg.PublicScheme, PublicPort: cfg.PublicPort,
 		TCPPortMin: cfg.TCPPortMin, TCPPortMax: cfg.TCPPortMax, TrustedProxies: cfg.TrustedProxies,
 		HealthCheck: d.HealthCheck, Logger: d.Logger, Inspector: recorder, Replay: rt,
-		Mailer: mailer, RegisterEnabled: cfg.RegisterEnabled, MaxTunnels: cfg.MaxAgentsPerUser * cfg.MaxTunnelsPerAgent,
+		Mailer: mailer, RegisterEnabled: cfg.RegisterEnabled, Access: keeper, MaxTunnels: cfg.MaxAgentsPerUser * cfg.MaxTunnelsPerAgent,
 	})
 	mgmt.Handle("/dashboard", dash)
 	mgmt.Handle("/dashboard/", dash)

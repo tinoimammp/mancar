@@ -40,6 +40,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tinoimammp/mancar/internal/access"
 	"github.com/tinoimammp/mancar/internal/gateway"
 	"github.com/tinoimammp/mancar/internal/inspect"
 	"github.com/tinoimammp/mancar/internal/mail"
@@ -131,6 +132,8 @@ type Options struct {
 	// MaxTunnels is how many tunnels one account can have open at once
 	// (MAX_AGENTS_PER_USER x MAX_TUNNELS_PER_AGENT), shown to users.
 	MaxTunnels int
+	// Access issues tickets into private tunnels; nil when they are off.
+	Access *access.Keeper
 }
 
 // Dashboard is an http.Handler for /dashboard/ and /api/v1/admin/.
@@ -253,6 +256,7 @@ func New(opts Options) *Dashboard {
 	me("GET /api/v1/me/device/{code}", d.myDevice)
 	me("POST /api/v1/me/device/{code}/approve", d.myDeviceApprove)
 	me("POST /api/v1/me/device/{code}/deny", d.myDeviceDeny)
+	me("POST /api/v1/me/access", d.myAccess)
 
 	for _, p := range []string{"/api/v1/admin/", "/api/v1/auth/", "/api/v1/me/"} {
 		d.mux.HandleFunc(p, func(w http.ResponseWriter, _ *http.Request) {

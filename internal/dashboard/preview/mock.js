@@ -14,7 +14,7 @@
   const agents = [
     { id: "s1", user_id: "u1", username: "tino", token_name: "macbook", token_id: "t1", client: "182.253.12.9",
       agent_version: "v0.3.2", connected_at: at(95), tunnels: [
-        { id: "a", proto: "http", hostname: `lunar-panther.${host}`, public_url: `https://lunar-panther.${host}`, created_at: at(90), active_connections: 3 },
+        { id: "a", proto: "http", hostname: `lunar-panther.${host}`, public_url: `https://lunar-panther.${host}`, created_at: at(90), active_connections: 3, private: true },
         { id: "b", proto: "tcp", port: 20042, public_url: `tcp://${host}:20042`, created_at: at(40), active_connections: 0 },
       ] },
     { id: "s2", user_id: "u2", username: "rina", token_name: "office-pc", token_id: "t2", client: "36.71.4.120",
@@ -356,6 +356,14 @@
     if (path === "/account/password") {
       if (body.current !== "password123") return json({ error: { code: "bad_password", message: "The current password is wrong (preview: it is password123)." } }, 400);
       return json(null, 204);
+    }
+    if (path === "/access") {
+      // a private tunnel: tino owns lunar-panther; any other account (log in
+      // as "admin") is not authorized
+      const tunnel = String(body.target).split(/[/?]/)[0];
+      if (!tunnel.endsWith("." + host)) return json({ error: { code: "not_found", message: "not a tunnel of this server" } }, 404);
+      const owner = session && session.username === "tino" && tunnel === `lunar-panther.${host}`;
+      return json({ url: (owner ? "tunnel.html?host=" : "restricted.html?host=") + encodeURIComponent(tunnel), allowed: owner });
     }
     const dev = path.match(/^\/device\/([A-Z0-9-]+)(\/(approve|deny))?$/i);
     if (dev) return dev[2] ? json(null, 204) : json({ user_code: dev[1].toUpperCase(), name: "MacBook-Pro-Tino", created_at: at(0.2) });

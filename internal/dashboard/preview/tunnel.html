@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tunnel (preview)</title>
+<!-- Stands in for the app behind a private tunnel once the owner got in
+     (preview only: a real tunnel shows the app itself). -->
+<script src="../static/theme.js"></script>
+<link rel="stylesheet" href="../static/style.css">
+</head>
+<body>
+<div class="login">
+  <main class="login-card">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="brand-text"><span class="brand-name">mancar</span><span class="brand-sub">Private tunnel</span></span>
+    </div>
+    <div class="check-email">
+      <span class="check-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1"/></svg>
+      </span>
+      <h1 class="check-title">Your app</h1>
+      <p class="auth-note">Preview only: the app behind <strong id="host">lunar-panther.labsdigitalside.my.id</strong> opens here.</p>
+    </div>
+    <div class="form"><a class="btn primary" href="./?as=user#tunnels">Back to the dashboard preview</a></div>
+  </main>
+</div>
+<script>
+  const host = new URLSearchParams(location.search).get("host");
+  if (host) document.getElementById("host").textContent = host;
+</script>
+</body>
+</html>

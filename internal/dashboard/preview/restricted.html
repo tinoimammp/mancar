@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Restricted (preview)</title>
+<!--
+  Preview of the page the gateway shows on a private tunnel's host to a
+  browser without access: the real template (../pages/restricted.html) with
+  ?host= filled in. "Log in to continue" goes to the preview's sign in page.
+-->
+<script>
+  const host = new URLSearchParams(location.search).get("host") || "lunar-panther.labsdigitalside.my.id";
+  const signIn = "./?as=guest#ref=" + encodeURIComponent(host + "/");
+  const esc = (s) => s.replace(/[&<>"']/g, (c) => "&#" + c.charCodeAt(0) + ";");
+  fetch("../pages/restricted.html").then((r) => r.text()).then((t) => {
+    document.open();
+    document.write(t.replaceAll("{{.Host}}", esc(host)).replaceAll("{{.SignIn}}", esc(signIn)).replaceAll("{{.Logo}}", "../static/logo.webp"));
+    document.close();
+  });
+</script>
