@@ -88,7 +88,7 @@ limits (browsers will not trust the staging certificate):
 
 ```bash
 echo 'ACME_CA=https://acme-staging-v02.api.letsencrypt.org/directory' >> .env
-docker compose up -d --build
+docker compose up -d
 docker compose logs -f caddy      # wait for "certificate obtained successfully", twice
 ```
 
@@ -124,14 +124,17 @@ mancar http 3000
 ## 7. Upgrading
 
 ```bash
-git pull
-docker compose up -d --build         # database migrations run automatically at start-up
+scripts/backup.sh                    # before releases that change the database
+docker compose pull                  # download first: the running gateway keeps serving
+docker compose up -d --wait          # swap the containers (tunnels pause ±15-45 s), wait until healthy
 ```
 
-In production pin a released version: set `MANCAR_VERSION=v1.2.3` in `.env`
-and use the published images (`docker compose pull && docker compose up -d`).
-Take a backup first (`scripts/backup.sh`). Agents reconnect on their own after a
-restart and keep their hostnames.
+The server never compiles anything: it runs the released images. Wait until the
+release on GitHub is finished (its images are published) before upgrading. In
+production pin a version in `.env`, written **without** a `v`
+(`MANCAR_VERSION=0.6.1`, the image tag); a tag that does not exist makes `pull`
+fail and leaves the running gateway untouched. Database migrations run when the
+new gateway starts. Agents reconnect on their own and keep their hostnames.
 
 ## Troubleshooting
 

@@ -12,8 +12,9 @@ docker compose exec gateway /mancard healthcheck      # the container's own chec
 ```
 
 `/api/v1/system/health` answers `{"status":"ok"}` to the internet. Version,
-database state and tunnel/session counters are returned only to clients inside
-the deployment (private address ranges), for example:
+database state and tunnel/session counters are returned only to direct
+requests from inside the deployment (a private address, not forwarded by the
+edge), for example:
 
 ```bash
 docker compose exec caddy wget -qO- --header 'Host: tunnel.example.com' \
@@ -188,7 +189,18 @@ scripts/restore.sh backups/mancar-20260101T031700Z.sql.gz --yes
 ```
 
 This replaces the current database contents. It stops the gateway during the
-restore and starts it again afterwards; agents reconnect by themselves.
+restore and starts it again afterwards; agents reconnect by themselves. The
+restore runs as one transaction: if anything fails, nothing is changed.
+
+A backup taken by an **older** version cannot be restored over a newer schema
+(newer tables refer to the old ones). To roll back, set `MANCAR_VERSION` to the
+version that made the backup, then empty the database first:
+
+```bash
+docker compose stop gateway
+docker compose exec postgres psql -U mancar -d mancar -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+scripts/restore.sh backups/mancar-<from-that-version>.sql.gz --yes
+```
 
 The scripts have been exercised against a real PostgreSQL 16 (retention,
 permissions, destroy-and-restore, a failing dump leaves no file), but not against
@@ -206,8 +218,14 @@ a Compose stack in this repository's CI.
 
 ```bash
 scripts/backup.sh
-docker compose up -d          # pulls a newer image if there is one, recreates changed containers
+docker compose pull           # download first; the running gateway keeps serving
+docker compose up -d --wait   # recreate changed containers, wait until they are healthy
 ```
+
+Tunnels pause for 15-45 seconds while the gateway is replaced (one process holds
+every agent connection); agents reconnect by themselves. Nothing is built on the
+server: a version that was not published (a typo, a `v` prefix, a release still
+running) makes `pull` fail and changes nothing.
 
 To move to a specific version, set `MANCAR_VERSION=0.3.0` and run the same
 command; to go back, set the previous version (and see below). Behind nginx,
@@ -243,8 +261,25 @@ are off for the same reason.
 | `RESPONSE_HEADER_TIMEOUT` | 2 m | Wait for the local app's response headers (`502` afterwards) |
 | `AUTH_FAILURE_LIMIT_PER_MINUTE` | 10 | Failed agent logins per client address; beyond it `429` without touching the database; `0` = off |
 | `TCP_PORT_MIN` / `TCP_PORT_MAX` | 20000 / 20099 | Public TCP tunnel ports (each published by Docker) |
+| `MAX_TCP_TUNNELS_PER_USER` | 10 | TCP tunnels one account may hold, so one account cannot take the whole range |
+| `PGBOUNCER_POOL_SIZE` | 10 | Server connections PgBouncer keeps to PostgreSQL (see below) |
 
 The limits live in the gateway's memory and apply per gateway process.
+
+### Database connections (PgBouncer)
+
+The gateway reaches PostgreSQL through **PgBouncer** in transaction pooling
+mode: the gateway may open up to 20 connections, PgBouncer serves them with
+`PGBOUNCER_POOL_SIZE` real ones, so PostgreSQL stays small on a small server.
+Everything mancar does with the database works per transaction (migrations
+take a transaction-level lock), and CI runs the database tests through
+PgBouncer in the same mode. Backups, restores and `psql` sessions go to the
+`postgres` service directly:
+
+```bash
+docker compose exec pgbouncer psql -h 127.0.0.1 -p 5432 -U mancar pgbouncer -c 'SHOW POOLS;'   # pool usage
+docker compose exec postgres psql -U mancar -d mancar                                          # the database itself
+```
 
 ## Monitoring
 

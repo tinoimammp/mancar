@@ -128,7 +128,7 @@ docker compose exec gateway /mancard token create --user alice --name laptop
 ### Updating the server
 
 ```bash
-docker compose up -d     # with MANCAR_VERSION=latest this pulls the newest release
+docker compose pull && docker compose up -d --wait   # download first, then swap (tunnels pause briefly)
 ```
 
 To run a specific version, set `MANCAR_VERSION=0.3.0` in `.env` and run the

@@ -101,7 +101,7 @@ A tunnel started with `--private` is only forwarded for its owner, and for the a
 
 ## Information disclosure
 
-* The public `/api/v1/system/health` answers only `{"status": ...}`. Version, database state and counters are for internal clients only; spoofing `X-Forwarded-For` cannot unlock them.
+* The public `/api/v1/system/health` answers only `{"status": ...}`. Version, database state and counters are only for direct requests from inside the deployment (a trusted address and no `X-Forwarded-For`); nothing that came through the edge gets them, and spoofing `X-Forwarded-For` cannot unlock them.
 * The root page does not show the version. Error pages are fixed strings: request paths, internal addresses and backend error text are never reflected.
 * Logs never contain tokens, secrets, database URLs or query strings. Configuration errors name the variable but never echo its value; database errors have the connection string redacted.
 
@@ -109,7 +109,7 @@ A tunnel started with `--private` is only forwarded for its owner, and for the a
 
 * TLS is terminated by Caddy (TLS 1.2+, HTTP/2 and HTTP/3 for browsers, automatic HTTPS and renewal). Certificates come from Let's Encrypt through the DNS-01 challenge.
 * The agent verifies the server certificate (TLS 1.2 minimum) and has **no option to skip verification**. It refuses `http://` server URLs unless the host is loopback (or `MANCAR_ALLOW_INSECURE=1` is set for a network you trust), because the token travels in the handshake.
-* Between Caddy and the gateway, and between the gateway and PostgreSQL, traffic is plain text inside the private Compose network.
+* Between Caddy and the gateway, and between the gateway, PgBouncer and PostgreSQL, traffic is plain text inside the private Compose network. PgBouncer and PostgreSQL authenticate with SCRAM-SHA-256.
 
 ## Resource limits (denial-of-service)
 
@@ -127,11 +127,15 @@ The gateway image is distroless (no shell, no package manager) and runs as an un
 
 | Gap | Consequence |
 |---|---|
-| No per-tunnel authentication, IP filtering or rate limiting | Anyone with the URL reaches your service. TCP tunnels are open public ports |
-| No audit log, no traffic log, no alerting | You see request logs but cannot answer "who created which tunnel when" |
-| Revocation does not end live sessions | Restart the gateway to cut a session immediately |
+| No password, IP filtering or rate limiting per tunnel (only `--private` / `--allow`) | Anyone with the URL of a public tunnel reaches your service. TCP tunnels are open public ports |
+| No alerting | The Activity page records account changes, but nothing notifies you |
+| Access to a private tunnel is checked against an in-memory revocation list | Disabling or deleting an account in the dashboard, or a new password, ends its tunnel access at once; the same done with the `mancard` CLI (another process) is caught only when the cookie expires (12 h). After a gateway restart the list is empty, so a cookie of a disabled account may work until it expires |
 | Limits and the failed-login limiter are in memory, per process | Not shared across several gateways; a restart resets them |
-| Limiter is keyed on the client IP | Many users behind one NAT share a budget; an attacker with a large IPv6 range can dilute it |
+| Limiter is keyed on the client IP (an IPv6 /64 counts as one) | Many users behind one NAT share a budget; an attacker with many IPv4 addresses can spread attempts. When the table is full (100 000 keys) old entries are dropped |
+| Some account facts can still be inferred | Sign up with an address that is already registered creates nothing, so the chosen username stays free; `--allow` names an unknown username or address (agent tokens only). Both answer the same status code and text |
+| One visitor can hold all 256 connections of a tunnel with slow uploads or idle WebSockets | That tunnel answers "busy" to others until they close |
+| Release downloads are checked against `SHA256SUMS` from the same release | It catches corrupted downloads, not a compromised GitHub account; there is no signature yet |
+| Limits are counted before the write (token limit, custom subdomain limit, TCP tunnels) | Simultaneous requests can exceed a limit by a few; they are fair-use limits, not security boundaries |
 | Hostname and TCP-port allocation assume a single gateway node | Do not run several gateway replicas against one database yet |
 | No built-in encryption of data at rest | Use disk encryption on the server; only token hashes and hostnames are stored |
 | Plain-text hops inside the Compose network | Acceptable on one host; reconsider for multi-host setups |

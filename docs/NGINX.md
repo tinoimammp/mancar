@@ -24,7 +24,7 @@ nginx picks up renewals.
 
 ```bash
 docker compose stop caddy && docker compose rm -f caddy   # if it was started
-docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d postgres gateway
+docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d postgres pgbouncer gateway
 ```
 
 The gateway now listens on `127.0.0.1:8080` only. TCP tunnels still use the
