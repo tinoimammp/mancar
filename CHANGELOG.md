@@ -7,6 +7,15 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 
 ## [Unreleased]
 
+### Added
+- **Private tunnels**: `mancar http 3000 --private` (or `config add-tunnel
+  ... --private`). Visitors see a Restricted page with "Log in to continue";
+  after logging in, only the account that owns the tunnel gets in, and
+  everyone else is back on the Restricted page. Access lasts 12 hours per
+  browser. The dashboard marks these tunnels "Private". They need the
+  dashboard (PostgreSQL); a server without it, or an older one, refuses
+  them instead of serving them publicly.
+
 ## [v0.4.0] - 2026-11-18
 
 ### Added

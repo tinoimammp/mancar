@@ -53,14 +53,20 @@ correlated by `req_id`. Unknown fields are ignored (forward compatibility).
 
 | `type` | Direction | Payload |
 |---|---|---|
-| `register` | agent → gateway | `proto` = `http` or `tcp`; `subdomain` optional (HTTP only, empty = random) |
-| `registered` | gateway → agent | `tunnel_id`, `proto`, `hostname` (HTTP), `port` (TCP), `public_url` |
+| `register` | agent → gateway | `proto` = `http` or `tcp`; `subdomain` optional (HTTP only, empty = random); `private` optional (HTTP only) |
+| `registered` | gateway → agent | `tunnel_id`, `proto`, `hostname` (HTTP), `port` (TCP), `public_url`, `private` |
 | `unregister` | agent → gateway | `tunnel_id`; only the session's own tunnels |
 | `ok` | gateway → agent | acknowledgement |
 | `error` | gateway → agent | `{"code": ..., "message": ...}` |
 
 Error codes: `hostname_taken`, `hostname_invalid`, `limit_exceeded`, `unsupported`,
 `not_found`, `bad_request`, `internal`.
+
+`private: true` asks for a tunnel only its owner can open (see
+[SECURITY.md](SECURITY.md#private-tunnels)). A gateway that cannot do this
+answers `unsupported`; an older gateway ignores the field, so the agent checks
+`registered.private` and closes the session when it is missing rather than
+serve the tunnel publicly.
 
 Subdomain rules: 3-63 characters of `a-z`, `0-9`, `-`; must start and end with a
 letter or digit; no `--` (which also excludes punycode); a list of reserved names

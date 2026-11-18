@@ -22,7 +22,8 @@ environment (see the note) · ❌ not implemented.
 | Multiple simultaneous tunnels | ✅ | Up to 10 per agent connection, many agents |
 | Persistent connections, reconnect | ✅ | Backoff 1 s → 30 s with jitter; a gateway restart is survived in about 2.5 s; random names survive reconnects |
 | Traffic inspection, request replay | ✅ | Dashboard **Requests** page: headers, bodies (first 64 KiB), responses, replay, copy as curl. Stored AES-256-GCM encrypted in PostgreSQL, deleted after `INSPECT_RETENTION`. HTTP only, not WebSocket frames or TCP |
-| Authentication policies (basic auth, OAuth), IP allow/deny | ❌ | Only agent-token authentication exists |
+| Private tunnels (owner signs in through the dashboard) | ✅ | `--private`; HTTP only, needs PostgreSQL |
+| Basic auth, IP allow/deny in front of a tunnel | ❌ | |
 | Rate limiting | ⚠️ | Only failed agent logins per client address. No per-tunnel or per-IP limit on public traffic |
 | Request size and connection limits | ✅ | |
 | Management REST API (OpenAPI) | ❌ | Only `/healthz` and `/api/v1/system/health`. Tokens are managed with `mancard token ...` |

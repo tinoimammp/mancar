@@ -48,7 +48,8 @@ There are two programs:
 | | Isolation: users cannot take over each other's hostnames | ✅ |
 | | Limits on tunnels, connections, request size; failed-login lockout | ✅ |
 | | Dashboard: hashed passwords, signed cookies, CSRF protection, strict CSP | ✅ |
-| | Basic auth / OAuth / IP rules in front of a tunnel | ❌ |
+| | Private tunnels: only the owner opens them, after signing in (`--private`) | ✅ |
+| | Basic auth / IP rules in front of a tunnel | ❌ |
 
 ✅ available · ❌ not yet. Details: [docs/STATUS.md](docs/STATUS.md).
 
@@ -197,7 +198,16 @@ mancar http 3000 --random             # random name, e.g. blue-falcon
 mancar http 3000                      # asks: random, custom, or one of your last 3 names
 mancar http 3000 --last               # reuse the name you used most recently
 mancar tcp 5432                       # raw TCP, e.g. a database -> YOUR_DOMAIN:200xx
+mancar http 3000 --private            # only you can open it (see below)
 ```
+
+**Private tunnels.** With `--private`, a visitor sees a **Restricted** page
+with a **Log in to continue** button. After logging in on the dashboard, the
+account that owns the tunnel is sent on to it; anyone else lands on the
+Restricted page again. Access lasts 12 hours per browser and tunnel. Good for
+admin panels and work in progress. It works for HTTP tunnels on servers with
+the dashboard (PostgreSQL). Requests without a browser (curl, webhooks) get
+`401`, so use a normal tunnel for those.
 
 While it runs, requests are printed. Successful static files (`.js`, `.css`,
 images, fonts) are folded into one line per page load, so the requests that
@@ -221,6 +231,7 @@ client reconnects and keeps the same address.
 ```bash
 mancar config add-tunnel web http 3000 --subdomain my-api
 mancar config add-tunnel db  tcp  5432
+mancar config add-tunnel admin http 8080 --private
 mancar start      # start all saved tunnels
 mancar status     # what is running
 mancar stop       # stop everything
