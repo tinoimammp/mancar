@@ -143,36 +143,25 @@ More: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) (troubleshooting) and
 
 ### 1. Install
 
-Download `mancar` from the
-[latest release](https://github.com/tinoimammp/mancar/releases/latest):
-
-| System | File |
-|---|---|
-| macOS, Apple Silicon | `mancar-<version>-darwin-arm64` |
-| macOS, Intel | `mancar-<version>-darwin-amd64` |
-| Linux | `mancar-<version>-linux-amd64` (or `-arm64`) |
-| Windows | `mancar-<version>-windows-amd64.exe` |
+Installs the latest release for your system and checks its checksum.
 
 macOS / Linux:
 
 ```bash
-curl -fL -o /tmp/mancar https://github.com/tinoimammp/mancar/releases/download/v0.2.0/mancar-v0.2.0-darwin-arm64
-chmod +x /tmp/mancar
-sudo mv /tmp/mancar /usr/local/bin/mancar
-mancar version
+curl -fsSL https://raw.githubusercontent.com/tinoimammp/mancar/main/scripts/install.sh | sh
 ```
 
-Later, update to the newest release with:
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/tinoimammp/mancar/main/scripts/install.ps1 | iex
+```
+
+Update later with:
 
 ```bash
-mancar update            # or: sudo mancar update, if installed in /usr/local/bin
-mancar update --check    # only check
+mancar update            # macOS/Linux: sudo mancar update
 ```
-
-The download is verified against the release's `SHA256SUMS` before it
-replaces the binary. When a newer release exists, every `mancar` command
-prints a one-line notice; running tunnels look for one once a day and
-`mancar version` checks right away. `MANCAR_NO_UPDATE_CHECK=1` turns this off.
 
 ### 2. Connect to your server
 

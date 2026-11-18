@@ -7,6 +7,11 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 
 ## [Unreleased]
 
+### Added
+- One-line client install that always takes the latest release and checks
+  its checksum: `curl -fsSL …/scripts/install.sh | sh` (macOS, Linux) and
+  `irm …/scripts/install.ps1 | iex` (Windows, no administrator needed).
+
 ## [v0.7.0] - 2026-11-18
 
 ### Added
