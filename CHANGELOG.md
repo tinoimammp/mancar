@@ -7,6 +7,8 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-11-18
+
 ### Added
 - Accounts with two roles. **Admins** see and manage the whole gateway;
   **users** sign in to see only their own tunnels, subdomains, tokens and
@@ -51,6 +53,13 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   disabled or deleted, from the CLI are now dropped within 30 seconds
   instead of staying connected until they reconnect.
 - The logo is now an image, also used as the browser icon.
+
+### Upgrading
+- Take a backup first (`scripts/backup.sh`): migration 0006 moves the
+  `admins` table into `users` and drops it.
+- Everyone signed in to the dashboard must sign in again once. Agents
+  reconnect by themselves and keep their hostnames.
+- Sign up stays off unless you set `REGISTER_ENABLED=true` and `SMTP_URL`.
 
 ## [v0.3.3] - 2026-11-17
 
@@ -182,6 +191,7 @@ First release.
   rate limiting.
 - Built with Go 1.26.11.
 
+[v0.4.0]: https://github.com/tinoimammp/mancar/compare/v0.3.3...v0.4.0
 [v0.3.3]: https://github.com/tinoimammp/mancar/compare/v0.3.2...v0.3.3
 [v0.3.2]: https://github.com/tinoimammp/mancar/compare/v0.3.1...v0.3.2
 [v0.3.1]: https://github.com/tinoimammp/mancar/compare/v0.3.0...v0.3.1
