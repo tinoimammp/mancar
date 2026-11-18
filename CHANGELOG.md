@@ -7,6 +7,18 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 
 ## [Unreleased]
 
+## [v0.6.0] - 2026-11-18
+
+### Added
+- `--allow budi,ana@example.com` shares a private tunnel with other accounts
+  (usernames or email addresses; implies `--private`), also for
+  `config add-tunnel`. An unknown name stops `mancar` with "no account:
+  NAME". The dashboard shows "Private, with budi, ana". Needs the server and
+  the client at the new version.
+
+### Upgrading
+- No migration. Update the server first, then the clients.
+
 ## [v0.5.1] - 2026-11-18
 
 ### Fixed
@@ -220,6 +232,7 @@ First release.
   rate limiting.
 - Built with Go 1.26.11.
 
+[v0.6.0]: https://github.com/tinoimammp/mancar/compare/v0.5.1...v0.6.0
 [v0.5.1]: https://github.com/tinoimammp/mancar/compare/v0.5.0...v0.5.1
 [v0.5.0]: https://github.com/tinoimammp/mancar/compare/v0.4.0...v0.5.0
 [v0.4.0]: https://github.com/tinoimammp/mancar/compare/v0.3.3...v0.4.0
