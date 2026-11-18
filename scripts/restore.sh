@@ -30,5 +30,12 @@ echo "stopping the gateway (agents will reconnect when it is back)"
 $COMPOSE stop gateway
 trap '$COMPOSE start gateway' EXIT
 
-gunzip -c "$FILE" | $COMPOSE exec -T postgres psql -q -o /dev/null -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME"
+# One transaction: if any statement fails, everything is rolled back and the
+# database is exactly as it was (never half dropped), so starting the
+# gateway again on exit is safe either way.
+if ! gunzip -c "$FILE" | $COMPOSE exec -T postgres psql -q -o /dev/null -v ON_ERROR_STOP=1 --single-transaction -U "$DB_USER" -d "$DB_NAME"; then
+  echo "restore FAILED: nothing was changed, the database is as it was before." >&2
+  echo "A backup from an older version cannot replace a newer database in place; see docs/OPERATIONS.md (Backups)." >&2
+  exit 1
+fi
 echo "restore complete"

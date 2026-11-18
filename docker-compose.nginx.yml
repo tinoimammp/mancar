@@ -1,7 +1,7 @@
 # Run mancar behind an existing nginx instead of the bundled Caddy edge, for
 # servers where nginx already owns ports 80 and 443. See docs/NGINX.md.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d postgres gateway
+#   docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d postgres pgbouncer gateway
 #
 # The gateway is published on loopback only; nginx terminates TLS and proxies
 # to it. Do not start the "caddy" service in this mode.

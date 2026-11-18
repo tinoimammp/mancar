@@ -1,10 +1,10 @@
-# mancar: gateway + PostgreSQL + TLS edge.
+# mancar: gateway + PgBouncer + PostgreSQL + TLS edge.
 #
 #   cp .env.example .env && ./scripts/setup.sh
 #   docker compose up -d
 #
 # Only the edge (80, 443) and the TCP tunnel port range are published.
-# PostgreSQL and the gateway's HTTP port are reachable only on the internal
+# PostgreSQL, PgBouncer and the gateway's HTTP port are reachable only on the internal
 # Docker network.
 
 name: mancar
@@ -34,11 +34,46 @@ services:
         max-file: "5"
     networks: [internal]
 
+  # Connection pooler between the gateway and PostgreSQL, in transaction
+  # pooling mode: many client connections share a few server connections,
+  # which keeps PostgreSQL's memory small. Backups and restores talk to the
+  # postgres service directly (pg_dump and a one-transaction restore do not
+  # belong behind a transaction pooler).
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.1-p0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_USER: "${POSTGRES_USER:-mancar}"
+      DB_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      DB_NAME: "${POSTGRES_DB:-mancar}"
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "${PGBOUNCER_POOL_SIZE:-10}"
+      STATS_USERS: "${POSTGRES_USER:-mancar}"     # SHOW POOLS / SHOW STATS, read-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U $${DB_USER} -d $${DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+    networks: [internal]
+
   gateway:
-    build:
-      context: .
-      args:
-        VERSION: "${MANCAR_VERSION:-dev}"
+    # Released images only: nothing is compiled on the server. A version
+    # that does not exist (a typo, "v0.6.0" instead of "0.6.0", a release
+    # still being built) fails here and leaves the running gateway alone.
+    # To run your own build: make docker, then MANCAR_IMAGE=mancar
+    # MANCAR_EDGE_IMAGE=mancar-edge MANCAR_VERSION=<version>
+    # MANCAR_PULL_POLICY=never docker compose up -d
     image: ${MANCAR_IMAGE:-ghcr.io/tinoimammp/mancar}:${MANCAR_VERSION:-latest}
     # "always": every "docker compose up" checks the registry, so
     # MANCAR_VERSION=latest picks up new releases. A pinned version that is
@@ -46,7 +81,7 @@ services:
     pull_policy: ${MANCAR_PULL_POLICY:-always}
     restart: unless-stopped
     depends_on:
-      postgres:
+      pgbouncer:
         condition: service_healthy
     environment:
       APP_ENV: "${APP_ENV:-production}"
@@ -54,7 +89,7 @@ services:
       LISTEN_ADDR: ":8080"
       PUBLIC_SCHEME: https
       STORAGE: postgres
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: pgbouncer              # through the connection pooler
       POSTGRES_USER: "${POSTGRES_USER:-mancar}"
       POSTGRES_DB: "${POSTGRES_DB:-mancar}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
@@ -70,6 +105,14 @@ services:
       HOSTNAME_HOLD_CUSTOM: "${HOSTNAME_HOLD_CUSTOM:-}"
       HOSTNAME_HOLD_RANDOM: "${HOSTNAME_HOLD_RANDOM:-}"
       AUTH_FAILURE_LIMIT_PER_MINUTE: "${AUTH_FAILURE_LIMIT_PER_MINUTE:-}"
+      MAX_TCP_TUNNELS_PER_USER: "${MAX_TCP_TUNNELS_PER_USER:-}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
+      INSPECT: "${INSPECT:-}"
+      INSPECT_RETENTION: "${INSPECT_RETENTION:-}"
+      INSPECT_MAX_BODY_BYTES: "${INSPECT_MAX_BODY_BYTES:-}"
+      INSPECT_MAX_ROWS: "${INSPECT_MAX_ROWS:-}"
+      REGISTER_ENABLED: "${REGISTER_ENABLED:-}"
+      SMTP_URL: "${SMTP_URL:-}"
     # TCP tunnels listen on this range inside the container; publish the same
     # range. Narrow TCP_PORT_MIN/TCP_PORT_MAX if you need few tunnels: Docker
     # starts one proxy per published port.
@@ -84,8 +127,6 @@ services:
     networks: [internal]
 
   caddy:
-    build:
-      context: ./docker/caddy
     image: ${MANCAR_EDGE_IMAGE:-ghcr.io/tinoimammp/mancar-edge}:${MANCAR_VERSION:-latest}
     pull_policy: ${MANCAR_PULL_POLICY:-always}
     restart: unless-stopped
