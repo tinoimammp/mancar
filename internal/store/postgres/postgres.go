@@ -125,11 +125,17 @@ func (s *Store) migrationTx(ctx context.Context, fn func(*sql.Tx) error) error {
 // PendingMigrations lists the migrations in fsys not applied yet. fresh is
 // true for a database that was never migrated at all.
 func (s *Store) PendingMigrations(ctx context.Context, fsys fs.FS) (pending []string, fresh bool, err error) {
-	var applied int
-	err = s.DB.QueryRowContext(ctx, `SELECT CASE WHEN to_regclass('schema_migrations') IS NULL THEN -1
-		ELSE (SELECT count(*) FROM schema_migrations) END`).Scan(&applied)
-	if err != nil {
+	// Two queries: PostgreSQL resolves every table a statement names before
+	// running it, so a CASE around a missing table still fails.
+	var exists bool
+	if err = s.DB.QueryRowContext(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
 		return nil, false, err
+	}
+	applied := 0
+	if exists {
+		if err = s.DB.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&applied); err != nil {
+			return nil, false, err
+		}
 	}
 	names, err := fs.Glob(fsys, "*.sql")
 	if err != nil {
