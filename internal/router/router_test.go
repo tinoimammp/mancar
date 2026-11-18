@@ -325,6 +325,37 @@ func TestPrivateTunnel(t *testing.T) {
 	}
 }
 
+func TestPrivateTunnelSharedWithAllow(t *testing.T) {
+	k := access.New("secret", true)
+	h := newHarness(t, func(o *router.Options) { o.Access = k })
+	tun := h.tunnels.hosts["app.mydomain.com"]
+	tun.UserID, tun.Private, tun.Allow = "owner", true, map[string]string{"budi": "budi"}
+	send := func(path string, c *http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "https://app.mydomain.com"+path, nil)
+		req.Host = "app.mydomain.com"
+		if c != nil {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		h.rt.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := send(access.Path+"?ticket="+url.QueryEscape(k.Ticket("app.mydomain.com", "ana")), nil); rec.Code != http.StatusForbidden {
+		t.Errorf("ticket of an account not allowed: %d", rec.Code)
+	}
+	rec := send(access.Path+"?ticket="+url.QueryEscape(k.Ticket("app.mydomain.com", "budi")), nil)
+	if rec.Code != http.StatusSeeOther || len(rec.Result().Cookies()) != 1 {
+		t.Fatalf("allowed account's ticket: %d", rec.Code)
+	}
+	if rec := send("/", rec.Result().Cookies()[0]); rec.Code != http.StatusBadGateway { // forwarded
+		t.Errorf("allowed account with its cookie: %d", rec.Code)
+	}
+	tun.Allow = nil // the owner restarted the tunnel without budi
+	if rec := send("/", rec.Result().Cookies()[0]); rec.Code == http.StatusBadGateway {
+		t.Error("cookie still works after the account was removed from --allow")
+	}
+}
+
 func TestPrivateTunnelShowsTheRestrictedPage(t *testing.T) {
 	var gotHost, gotSignIn string
 	h := newHarness(t, func(o *router.Options) {

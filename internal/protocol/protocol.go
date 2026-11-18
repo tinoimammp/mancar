@@ -87,16 +87,20 @@ type Register struct {
 	// signing in to the dashboard). A gateway that does not know the field
 	// ignores it; Registered.Private tells the agent whether it was applied.
 	Private bool `json:"private,omitempty"`
+	// Allow lets these accounts (usernames or email addresses) open a
+	// private tunnel too. Registered.Allow echoes them as usernames.
+	Allow []string `json:"allow,omitempty"`
 }
 
 // Registered confirms a tunnel.
 type Registered struct {
-	TunnelID  string `json:"tunnel_id"`
-	Proto     string `json:"proto"`
-	Hostname  string `json:"hostname,omitempty"`
-	Port      int    `json:"port,omitempty"`
-	PublicURL string `json:"public_url"`
-	Private   bool   `json:"private,omitempty"`
+	TunnelID  string   `json:"tunnel_id"`
+	Proto     string   `json:"proto"`
+	Hostname  string   `json:"hostname,omitempty"`
+	Port      int      `json:"port,omitempty"`
+	PublicURL string   `json:"public_url"`
+	Private   bool     `json:"private,omitempty"`
+	Allow     []string `json:"allow,omitempty"`
 }
 
 // Unregister removes one tunnel while keeping the session.

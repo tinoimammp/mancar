@@ -76,7 +76,18 @@ type Options struct {
 	// PrivateTunnels allows tunnels only their owner can open. It needs the
 	// dashboard (accounts) to sign visitors in.
 	PrivateTunnels bool
+	// ResolveLogins turns the usernames or email addresses of --allow into
+	// accounts (ID -> username). An unknown one is an error wrapping
+	// ErrUnknownUser. Nil: --allow is not supported.
+	ResolveLogins func(ctx context.Context, logins []string) (map[string]string, error)
 }
+
+// ErrUnknownUser is returned by Options.ResolveLogins for a name or email
+// address with no account.
+var ErrUnknownUser = errors.New("no account")
+
+// MaxAllow bounds the accounts one private tunnel can be shared with.
+const MaxAllow = 20
 
 func (o *Options) defaults() {
 	if o.MaxTunnelsPerSession <= 0 {
@@ -114,13 +125,21 @@ type Tunnel struct {
 	PublicURL string
 	UserID    string
 	CreatedAt time.Time
-	// Private: only the owner may open it (checked by the router).
+	// Private: only the owner, and the accounts in Allow (user ID ->
+	// username), may open it (checked by the router).
 	Private bool
+	Allow   map[string]string
 
 	sess  *session
 	lease domain.Lease
 	ln    net.Listener
 	sem   chan struct{}
+}
+
+// MayOpen reports whether the account may open this private tunnel.
+func (t *Tunnel) MayOpen(userID string) bool {
+	_, allowed := t.Allow[userID]
+	return userID != "" && (userID == t.UserID || allowed)
 }
 
 // OpenStream opens a new stream to the agent for this tunnel.
@@ -260,6 +279,8 @@ type TunnelInfo struct {
 	CreatedAt   time.Time `json:"created_at"`
 	ActiveConns int       `json:"active_connections"`
 	Private     bool      `json:"private,omitempty"`
+	SharedWith  []string  `json:"shared_with,omitempty"` // usernames besides the owner
+	AllowIDs    []string  `json:"-"`                     // their account IDs
 }
 
 // SessionInfo is a read-only view of a connected agent.
@@ -285,10 +306,17 @@ func (h *Hub) Sessions() []SessionInfo {
 			AgentVersion: s.version, ConnectedAt: s.connected, Tunnels: []TunnelInfo{},
 		}
 		for _, t := range s.tunnels {
-			si.Tunnels = append(si.Tunnels, TunnelInfo{
+			ti := TunnelInfo{
 				ID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port,
 				PublicURL: t.PublicURL, CreatedAt: t.CreatedAt, ActiveConns: len(t.sem), Private: t.Private,
-			})
+			}
+			for id, name := range t.Allow {
+				if id != t.UserID {
+					ti.AllowIDs, ti.SharedWith = append(ti.AllowIDs, id), append(ti.SharedWith, name)
+				}
+			}
+			sort.Strings(ti.SharedWith)
+			si.Tunnels = append(si.Tunnels, ti)
 		}
 		sort.Slice(si.Tunnels, func(i, j int) bool { return si.Tunnels[i].CreatedAt.Before(si.Tunnels[j].CreatedAt) })
 		out = append(out, si)
@@ -626,8 +654,30 @@ func (h *Hub) register(s *session, reg *protocol.Register) *protocol.Message {
 	if reg.Private && !h.opts.PrivateTunnels {
 		return errMsg(protocol.CodeUnsupported, "private tunnels need the dashboard (PostgreSQL) on this server")
 	}
+	var allow map[string]string
+	if len(reg.Allow) > 0 {
+		switch {
+		case !reg.Private:
+			return errMsg(protocol.CodeBadRequest, "allow only applies to private tunnels")
+		case len(reg.Allow) > MaxAllow:
+			return errMsg(protocol.CodeLimitExceeded, "a tunnel can be shared with at most %d accounts", MaxAllow)
+		case h.opts.ResolveLogins == nil:
+			return errMsg(protocol.CodeUnsupported, "this server cannot share private tunnels")
+		}
+		rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var err error
+		allow, err = h.opts.ResolveLogins(rctx, reg.Allow)
+		rcancel()
+		switch {
+		case errors.Is(err, ErrUnknownUser):
+			return errMsg(protocol.CodeBadRequest, "%s", err.Error())
+		case err != nil:
+			h.log.Error("resolving allowed accounts failed", "err", err)
+			return errMsg(protocol.CodeInternal, "could not look up the allowed accounts")
+		}
+	}
 	t := &Tunnel{
-		ID: randomID(12), Proto: reg.Proto, UserID: s.userID, CreatedAt: time.Now(), Private: reg.Private,
+		ID: randomID(12), Proto: reg.Proto, UserID: s.userID, CreatedAt: time.Now(), Private: reg.Private, Allow: allow,
 		sess: s, sem: make(chan struct{}, h.opts.MaxConnsPerTunnel),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -673,8 +723,13 @@ func (h *Hub) register(s *session, reg *protocol.Register) *protocol.Message {
 		go h.acceptTCP(t)
 	}
 	h.log.Info("tunnel registered", "tunnel", t.ID, "session", s.id, "user", s.userID, "url", t.PublicURL)
+	var names []string
+	for _, n := range t.Allow {
+		names = append(names, n)
+	}
+	sort.Strings(names)
 	return &protocol.Message{Type: protocol.TypeRegistered, Registered: &protocol.Registered{
-		TunnelID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port, PublicURL: t.PublicURL, Private: t.Private,
+		TunnelID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port, PublicURL: t.PublicURL, Private: t.Private, Allow: names,
 	}}
 }
 

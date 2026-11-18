@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/tinoimammp/mancar/internal/access"
@@ -38,8 +39,8 @@ func RestrictedPage(w http.ResponseWriter, host, signIn string) {
 }
 
 // myAccess sends the signed-in person on from the sign in page (#ref=
-// HOST/PATH) to a tunnel. The owner of a live private tunnel gets its URL
-// with a one-time ticket; anyone else (and any host that is offline) gets
+// HOST/PATH) to a tunnel. The owner of a live private tunnel, and the
+// accounts it was shared with (--allow), get its URL with a one-time ticket; anyone else (and any host that is offline) gets
 // the plain URL, where the gateway shows the Restricted page again;
 // "allowed" tells the dashboard which of the two it is. Someone else's
 // tunnel and an offline one answer alike, so this does not reveal who owns
@@ -73,13 +74,13 @@ func (d *Dashboard) myAccess(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{"url": plain + path, "allowed": false}
 	for _, s := range d.opts.Hub.Sessions() {
-		if s.UserID != a.ID {
-			continue
-		}
 		for _, t := range s.Tunnels {
-			if t.Hostname == host && t.Private && d.opts.Access != nil {
+			mayOpen := s.UserID == a.ID || slices.Contains(t.AllowIDs, a.ID)
+			switch {
+			case t.Hostname != host || !mayOpen:
+			case t.Private && d.opts.Access != nil:
 				out["url"], out["allowed"] = d.opts.Access.TicketURL(t.PublicURL, host, a.ID, path), true
-			} else if t.Hostname == host {
+			case !t.Private:
 				out["url"], out["allowed"] = strings.TrimSuffix(t.PublicURL, "/")+path, true
 			}
 		}

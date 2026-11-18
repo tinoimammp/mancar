@@ -231,7 +231,7 @@ func (rt *Router) letIn(w http.ResponseWriter, r *http.Request, host string, t *
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Path == access.Path {
 		user, ok := k.Redeem(r.URL.Query().Get("ticket"), host)
-		if !ok || user != t.UserID {
+		if !ok || !t.MayOpen(user) {
 			writeError(w, http.StatusForbidden, "access_denied", "This sign-in link has expired or was already used. Open the address again.")
 			return false
 		}
@@ -239,7 +239,7 @@ func (rt *Router) letIn(w http.ResponseWriter, r *http.Request, host string, t *
 		http.Redirect(w, r, access.SafeNext(r.URL.Query().Get("next")), http.StatusSeeOther)
 		return false
 	}
-	if k.Allowed(r, host, t.UserID) {
+	if k.Allowed(r, host, t.MayOpen) {
 		w.Header().Del("Cache-Control") // the app decides from here
 		k.StripCookie(r.Header)
 		return true

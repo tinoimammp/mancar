@@ -37,11 +37,12 @@ import (
 
 // TunnelSpec describes one tunnel the agent should maintain.
 type TunnelSpec struct {
-	Name      string `json:"name,omitempty"`
-	Proto     string `json:"proto"`
-	LocalAddr string `json:"addr"`                // host:port of the local service
-	Subdomain string `json:"subdomain,omitempty"` // empty = random (HTTP only)
-	Private   bool   `json:"private,omitempty"`   // only the owner can open it (HTTP only)
+	Name      string   `json:"name,omitempty"`
+	Proto     string   `json:"proto"`
+	LocalAddr string   `json:"addr"`                // host:port of the local service
+	Subdomain string   `json:"subdomain,omitempty"` // empty = random (HTTP only)
+	Private   bool     `json:"private,omitempty"`   // only the owner can open it (HTTP only)
+	Allow     []string `json:"allow,omitempty"`     // other accounts that may open it too (needs Private)
 }
 
 // Options configures an Agent.
@@ -310,14 +311,14 @@ func (a *Agent) registerAll(sess *yamux.Session) ([]TunnelStatus, error) {
 		if a.assigned[i] != "" {
 			label = a.assigned[i] // keep the same public name across reconnects
 		}
-		m, err := call(i, protocol.Register{Proto: spec.Proto, Subdomain: label, Private: spec.Private})
+		m, err := call(i, protocol.Register{Proto: spec.Proto, Subdomain: label, Private: spec.Private, Allow: spec.Allow})
 		if err != nil {
 			return nil, err
 		}
 		if m.Type == protocol.TypeError && m.Error != nil && m.Error.Code == protocol.CodeHostnameTaken &&
 			spec.Subdomain == "" && label != "" {
 			// Our previous random name was taken meanwhile: get a new one.
-			if m, err = call(i, protocol.Register{Proto: spec.Proto, Private: spec.Private}); err != nil {
+			if m, err = call(i, protocol.Register{Proto: spec.Proto, Private: spec.Private, Allow: spec.Allow}); err != nil {
 				return nil, err
 			}
 		}
@@ -333,6 +334,12 @@ func (a *Agent) registerAll(sess *yamux.Session) ([]TunnelStatus, error) {
 			// The caller closes the session, which removes the tunnel.
 			return nil, &RegistrationError{Spec: spec, Err: &protocol.Error{Code: protocol.CodeUnsupported,
 				Message: "this server does not support private tunnels; update it, or run without --private"}}
+		}
+		if len(spec.Allow) > 0 && len(m.Registered.Allow) == 0 {
+			// An older gateway ignored "allow" (the tunnel would be the
+			// owner's only): say so rather than leave the others locked out.
+			return nil, &RegistrationError{Spec: spec, Err: &protocol.Error{Code: protocol.CodeUnsupported,
+				Message: "this server does not support --allow; update it"}}
 		}
 		if m.Registered.Hostname != "" {
 			a.assigned[i], _, _ = strings.Cut(m.Registered.Hostname, ".")

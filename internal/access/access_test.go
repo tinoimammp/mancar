@@ -21,6 +21,8 @@ func cookieFrom(t *testing.T, k *access.Keeper, host, user string) *http.Cookie 
 	return cs[0]
 }
 
+func is(id string) func(string) bool { return func(u string) bool { return u == id } }
+
 func TestTicketIsSingleUseAndBound(t *testing.T) {
 	k := access.New("secret", true)
 	tk := k.Ticket("app.example.com", "u1")
@@ -57,19 +59,19 @@ func TestCookie(t *testing.T) {
 	}
 	r := httptest.NewRequest("GET", "https://app.example.com/", nil)
 	r.AddCookie(c)
-	if !k.Allowed(r, "app.example.com", "u1") {
+	if !k.Allowed(r, "app.example.com", is("u1")) {
 		t.Error("own cookie refused")
 	}
-	if k.Allowed(r, "app.example.com", "u2") {
+	if k.Allowed(r, "app.example.com", is("u2")) {
 		t.Error("cookie let another owner's tunnel in (hostname reused)")
 	}
-	if k.Allowed(r, "evil.example.com", "u1") {
+	if k.Allowed(r, "evil.example.com", is("u1")) {
 		t.Error("cookie worked on another host")
 	}
 	// a ticket is not a cookie
 	r2 := httptest.NewRequest("GET", "https://app.example.com/", nil)
 	r2.AddCookie(&http.Cookie{Name: c.Name, Value: k.Ticket("app.example.com", "u1")})
-	if k.Allowed(r2, "app.example.com", "u1") {
+	if k.Allowed(r2, "app.example.com", is("u1")) {
 		t.Error("ticket accepted as a cookie")
 	}
 }

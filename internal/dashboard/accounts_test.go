@@ -514,6 +514,8 @@ func TestPrivateTunnelAccess(t *testing.T) {
 		}},
 		{ID: "s2", UserID: "a1", Tunnels: []gateway.TunnelInfo{
 			{Proto: "http", Hostname: "root.tunnel.example.com", PublicURL: "https://root.tunnel.example.com", Private: true},
+			{Proto: "http", Hostname: "team.tunnel.example.com", PublicURL: "https://team.tunnel.example.com", Private: true,
+				SharedWith: []string{"tino"}, AllowIDs: []string{"u-tino"}},
 		}},
 	}}
 	d := dashboard.New(dashboard.Options{Store: st, Hub: hub, SessionSecret: strings.Repeat("s", 32), Secure: true,
@@ -550,6 +552,11 @@ func TestPrivateTunnelAccess(t *testing.T) {
 	if codeOther != http.StatusOK || other["url"] != "https://root.tunnel.example.com/a" || other["allowed"] != false ||
 		codeOff != http.StatusOK || strings.Replace(fmt.Sprint(other), "root", "gone", 1) != fmt.Sprint(off) {
 		t.Errorf("another account's tunnel: %d %v / offline: %d %v", codeOther, other, codeOff, off)
+	}
+	// root shared team.* with tino (--allow tino)
+	if code, out := ask("team.tunnel.example.com/", true); code != http.StatusOK || out["allowed"] != true ||
+		!strings.HasPrefix(fmt.Sprint(out["url"]), "https://team.tunnel.example.com"+access.Path+"?") {
+		t.Errorf("tunnel shared with this account: %d %v", code, out)
 	}
 	// never a redirect off this server
 	for _, target := range []string{"evil.com/", "tunnel.example.com/", "x.tunnel.example.com.evil.com/", "a_b.tunnel.example.com/"} {

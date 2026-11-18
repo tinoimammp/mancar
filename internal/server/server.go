@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/tinoimammp/mancar/internal/access"
@@ -25,6 +27,7 @@ import (
 	"github.com/tinoimammp/mancar/internal/netutil"
 	"github.com/tinoimammp/mancar/internal/protocol"
 	"github.com/tinoimammp/mancar/internal/router"
+	"github.com/tinoimammp/mancar/internal/store/postgres"
 	"github.com/tinoimammp/mancar/internal/usage"
 	"github.com/tinoimammp/mancar/internal/version"
 )
@@ -78,7 +81,7 @@ func New(d Deps) *Server {
 		MaxTunnelsPerSession: cfg.MaxTunnelsPerAgent, MaxSessionsPerUser: cfg.MaxAgentsPerUser,
 		MaxConnsPerTunnel: cfg.MaxConnsPerTunnel, KeepAliveInterval: d.KeepAlive, Logger: d.Logger,
 		TrustedProxies: cfg.TrustedProxies, AuthFailureLimit: authFailureLimit(cfg), AuthFailureWindow: time.Minute,
-		PrivateTunnels: d.Admin != nil,
+		PrivateTunnels: d.Admin != nil, ResolveLogins: resolveLogins(d.Admin),
 	})
 	// Private tunnels sign visitors in through the dashboard, so they need
 	// accounts (PostgreSQL).
@@ -290,4 +293,32 @@ func authFailureLimit(cfg *config.Config) int {
 		return -1
 	}
 	return cfg.AuthFailureLimit
+}
+
+// resolveLogins turns the usernames or email addresses of "mancar http
+// --allow" into accounts (ID -> username). Without accounts (no dashboard)
+// sharing is off.
+func resolveLogins(st dashboard.Store) func(context.Context, []string) (map[string]string, error) {
+	if st == nil {
+		return nil
+	}
+	return func(ctx context.Context, logins []string) (map[string]string, error) {
+		out := map[string]string{}
+		var unknown []string
+		for _, l := range logins {
+			a, err := st.AccountByLogin(ctx, l)
+			switch {
+			case errors.Is(err, postgres.ErrNotFound):
+				unknown = append(unknown, l)
+			case err != nil:
+				return nil, err
+			default:
+				out[a.ID] = a.Username
+			}
+		}
+		if len(unknown) > 0 {
+			return nil, fmt.Errorf("%w: %s", gateway.ErrUnknownUser, strings.Join(unknown, ", "))
+		}
+		return out, nil
+	}
 }

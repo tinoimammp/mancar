@@ -14,8 +14,9 @@
 //     (__Host- prefix: no Domain attribute, Secure, Path=/) and removes
 //     the cookie from every request it forwards to the app.
 //
-// Tickets and cookies are bound to the owner's account ID, so a hostname
-// that later belongs to someone else does not let the old cookie in.
+// Tickets and cookies name the visitor's account, and the tunnel decides
+// who may open it (its owner, plus the accounts given with --allow), so a
+// hostname that later belongs to someone else does not let an old cookie in.
 package access
 
 import (
@@ -162,12 +163,12 @@ func (k *Keeper) SetCookie(w http.ResponseWriter, host, userID string) {
 	})
 }
 
-// Allowed reports whether r carries a valid access cookie for host and
-// the account ownerID.
-func (k *Keeper) Allowed(r *http.Request, host, ownerID string) bool {
+// Allowed reports whether r carries a valid access cookie for host whose
+// account may open it (mayOpen: the owner, or someone the owner allowed).
+func (k *Keeper) Allowed(r *http.Request, host string, mayOpen func(userID string) bool) bool {
 	for _, c := range r.Cookies() {
 		if c.Name == k.CookieName() {
-			if got, ok := k.parse(c.Value, kindCookie, host); ok && got.User == ownerID {
+			if got, ok := k.parse(c.Value, kindCookie, host); ok && mayOpen(got.User) {
 				return true
 			}
 		}
