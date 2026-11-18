@@ -7,6 +7,14 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 
 ## [Unreleased]
 
+## [v0.5.1] - 2026-11-18
+
+### Fixed
+- `mancar update` no longer fails with "403 Forbidden" on shared networks.
+  It reads the latest version from the release's `SHA256SUMS` on github.com
+  instead of the GitHub API, which allows only 60 requests an hour per
+  address. When GitHub does refuse, it says so and suggests waiting.
+
 ## [v0.5.0] - 2026-11-18
 
 ### Added
@@ -212,6 +220,7 @@ First release.
   rate limiting.
 - Built with Go 1.26.11.
 
+[v0.5.1]: https://github.com/tinoimammp/mancar/compare/v0.5.0...v0.5.1
 [v0.5.0]: https://github.com/tinoimammp/mancar/compare/v0.4.0...v0.5.0
 [v0.4.0]: https://github.com/tinoimammp/mancar/compare/v0.3.3...v0.4.0
 [v0.3.3]: https://github.com/tinoimammp/mancar/compare/v0.3.2...v0.3.3
