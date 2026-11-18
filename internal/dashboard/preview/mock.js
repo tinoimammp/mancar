@@ -14,7 +14,7 @@
   const agents = [
     { id: "s1", user_id: "u1", username: "tino", token_name: "macbook", token_id: "t1", client: "182.253.12.9",
       agent_version: "v0.3.2", connected_at: at(95), tunnels: [
-        { id: "a", proto: "http", hostname: `lunar-panther.${host}`, public_url: `https://lunar-panther.${host}`, created_at: at(90), active_connections: 3, private: true },
+        { id: "a", proto: "http", hostname: `lunar-panther.${host}`, public_url: `https://lunar-panther.${host}`, created_at: at(90), active_connections: 3, private: true, shared_with: ["ana", "budi"] },
         { id: "b", proto: "tcp", port: 20042, public_url: `tcp://${host}:20042`, created_at: at(40), active_connections: 0 },
       ] },
     { id: "s2", user_id: "u2", username: "rina", token_name: "office-pc", token_id: "t2", client: "36.71.4.120",
