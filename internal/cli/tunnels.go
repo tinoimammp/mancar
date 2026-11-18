@@ -25,6 +25,7 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 	subdomain := fs.String("subdomain", "", "request this subdomain (http only)")
 	random := fs.Bool("random", false, "use a random subdomain (http only)")
 	last := fs.Bool("last", false, "reuse the subdomain used most recently with this server (http only)")
+	private := fs.Bool("private", false, "only you can open it, after signing in to the dashboard (http only)")
 	quiet := fs.Bool("quiet", false, "do not print the request log")
 	logFlag := fs.String("log", logSmart, "request log: smart (summarise static files), all, errors")
 	pos, err := parseFlags(fs, args)
@@ -36,10 +37,10 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 		return fail(e, 2, "%v", err)
 	}
 	if len(pos) != 1 {
-		return fail(e, 2, "usage: mancar %s PORT|HOST:PORT%s", proto, map[bool]string{true: " [--subdomain NAME | --random]"}[proto == protocol.ProtoHTTP])
+		return fail(e, 2, "usage: mancar %s PORT|HOST:PORT%s", proto, map[bool]string{true: " [--subdomain NAME | --random] [--private]"}[proto == protocol.ProtoHTTP])
 	}
-	if proto == protocol.ProtoTCP && (*subdomain != "" || *random || *last) {
-		return fail(e, 2, "--subdomain, --random and --last only apply to http tunnels")
+	if proto == protocol.ProtoTCP && (*subdomain != "" || *random || *last || *private) {
+		return fail(e, 2, "--subdomain, --random, --last and --private only apply to http tunnels")
 	}
 	if n := btoi(*subdomain != "") + btoi(*random) + btoi(*last); n > 1 {
 		return fail(e, 2, "--subdomain, --random and --last cannot be combined")
@@ -81,7 +82,7 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 			return fail(e, 1, "no input; aborting")
 		}
 	}
-	spec := agent.TunnelSpec{Proto: proto, LocalAddr: addr, Subdomain: label}
+	spec := agent.TunnelSpec{Proto: proto, LocalAddr: addr, Subdomain: label, Private: *private}
 	if label != "" {
 		fmt.Fprintln(e.Stdout, "Checking availability...")
 	}
@@ -267,6 +268,9 @@ func describeRegistrationError(r *agent.RegistrationError) string {
 	case protocol.CodeLimitExceeded:
 		return "limit reached: " + r.Err.Message
 	case protocol.CodeUnsupported:
+		if r.Spec.Private {
+			return r.Err.Message
+		}
 		return fmt.Sprintf("this gateway does not support %s tunnels: %s", r.Spec.Proto, r.Err.Message)
 	}
 	return r.Err.Message
@@ -515,6 +519,9 @@ func printOnline(w io.Writer, ts []agent.TunnelStatus, first bool) {
 	}
 	for _, t := range ts {
 		fmt.Fprintf(w, "%s\n    -> %s://%s\n", t.Registered.PublicURL, t.Spec.Proto, t.Spec.LocalAddr)
+		if t.Registered.Private {
+			fmt.Fprintln(w, "    Private: only you can open it, after signing in to the dashboard")
+		}
 		if multi {
 			fmt.Fprintf(w, "    Protocol: %s   TLS: %s\n", strings.ToUpper(t.Spec.Proto), tlsLabel(t))
 		}

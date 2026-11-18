@@ -141,3 +141,24 @@ func TestHeartbeatKeepsTheStateFileFresh(t *testing.T) {
 	first := read()
 	eventually(t, "a heartbeat", func() bool { return read().After(first) })
 }
+
+func TestStatusMarksPrivateTunnels(t *testing.T) {
+	m := newMachine(t, nil)
+	const pid = 42000
+	m.mu.Lock()
+	m.procs[pid] = func() {} // a running agent, as far as status can tell
+	m.mu.Unlock()
+	os.MkdirAll(m.stateDir, 0o700)
+	now := time.Now()
+	b, _ := json.Marshal(map[string]any{"pid": pid, "started": now, "updated": now, "state": "online",
+		"tunnels": []map[string]any{
+			{"proto": "http", "public_url": "https://admin.tunnel.test", "local": "localhost:8080", "private": true},
+			{"proto": "http", "public_url": "https://www.tunnel.test", "local": "localhost:3000"},
+		}})
+	os.WriteFile(filepath.Join(m.stateDir, fmt.Sprintf("agent-%d.json", pid)), b, 0o600)
+	st := m.run("status")
+	lines := strings.Split(st.stdout, "\n")
+	if st.code != 0 || len(lines) < 3 || !strings.Contains(lines[1], "http (private)") || strings.Contains(lines[2], "private") {
+		t.Errorf("status:\n%s", st.stdout)
+	}
+}

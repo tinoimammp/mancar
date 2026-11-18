@@ -48,6 +48,7 @@ func TestUsageErrors(t *testing.T) {
 		{"upper-case junk subdomain", []string{"http", port, "--subdomain", "my_api"}, "invalid subdomain"},
 		{"tcp with subdomain", []string{"tcp", port, "--subdomain", "x-y-z"}, "only apply to http"},
 		{"tcp with random", []string{"tcp", port, "--random"}, "only apply to http"},
+		{"tcp private", []string{"tcp", port, "--private"}, "only apply to http"},
 		{"unknown flag", []string{"http", port, "--bogus"}, "flag provided but not defined"},
 	}
 	for _, tc := range cases {

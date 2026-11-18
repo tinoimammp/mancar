@@ -23,6 +23,7 @@ type instanceTunnel struct {
 	Proto     string `json:"proto"`
 	PublicURL string `json:"public_url"`
 	Local     string `json:"local"`
+	Private   bool   `json:"private,omitempty"`
 }
 
 type instanceState struct {
@@ -90,7 +91,7 @@ func (i *instance) update(s agent.Status) {
 	if len(s.Tunnels) > 0 {
 		i.st.Tunnels = i.st.Tunnels[:0]
 		for _, t := range s.Tunnels {
-			i.st.Tunnels = append(i.st.Tunnels, instanceTunnel{Proto: t.Spec.Proto, PublicURL: t.Registered.PublicURL, Local: t.Spec.LocalAddr})
+			i.st.Tunnels = append(i.st.Tunnels, instanceTunnel{Proto: t.Spec.Proto, PublicURL: t.Registered.PublicURL, Local: t.Spec.LocalAddr, Private: t.Registered.Private})
 		}
 	}
 	i.flushLocked()
@@ -174,7 +175,11 @@ func cmdStatus(e Env, args []string) int {
 			if url == "" {
 				url = "-"
 			}
-			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", st.PID, st.State, t.Proto, url, t.Local)
+			proto := t.Proto
+			if t.Private {
+				proto += " (private)"
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", st.PID, st.State, proto, url, t.Local)
 		}
 	}
 	tw.Flush()

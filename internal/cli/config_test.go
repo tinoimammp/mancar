@@ -118,6 +118,7 @@ func TestConfigUsageErrors(t *testing.T) {
 		{"config", "set"}, {"config", "set", "server"}, {"config", "set", "colour", "red"},
 		{"config", "set", "token", "a", "b"}, {"config", "unset"}, {"config", "unset", "tunnels"},
 		{"config", "frobnicate"}, {"config", "add-tunnel"}, {"config", "rm-tunnel"},
+		{"config", "set", "server", "https://tunnel.example.com", "--private"}, {"config", "--subdomain", "x-y-z"},
 	} {
 		if r := m.run(args...); r.code != 2 {
 			t.Errorf("%v: exit %d, want 2 (%s)", args, r.code, r.stderr)
@@ -154,8 +155,11 @@ func TestConfigTunnels(t *testing.T) {
 	if r := m.run("config", "add-tunnel", "db", "tcp", "127.0.0.1:5432"); r.code != 0 {
 		t.Fatalf("%+v", r)
 	}
+	if r := m.run("config", "add-tunnel", "admin", "http", "8080", "--private"); r.code != 0 {
+		t.Fatalf("%+v", r)
+	}
 	show := m.run("config").stdout
-	for _, want := range []string{"web: http localhost:3000 subdomain=my-app", "db: tcp 127.0.0.1:5432"} {
+	for _, want := range []string{"web: http localhost:3000 subdomain=my-app", "db: tcp 127.0.0.1:5432", "admin: http localhost:8080 private"} {
 		if !strings.Contains(show, want) {
 			t.Errorf("show is missing %q:\n%s", want, show)
 		}
@@ -169,6 +173,7 @@ func TestConfigTunnels(t *testing.T) {
 		{[]string{"x", "udp", "3000"}, "http or tcp"},
 		{[]string{"x", "http", "nope"}, "not a valid local address"},
 		{[]string{"x", "tcp", "3000", "--subdomain", "abc-def"}, "only applies to http"},
+		{[]string{"x", "tcp", "3000", "--private"}, "only applies to http"},
 		{[]string{"x", "http", "3000", "--subdomain", "ab"}, "3-63"},
 		{[]string{"web", "http", "4000"}, "already exists"},
 	}
