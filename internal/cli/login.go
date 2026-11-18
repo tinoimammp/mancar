@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -71,6 +72,12 @@ func cmdLogin(ctx context.Context, e Env, args []string) int {
 	if start.DeviceCode == "" || start.UserCode == "" {
 		return fail(e, 1, "the server gave an unexpected answer")
 	}
+	// The link is opened in a browser (on Windows through the shell): only
+	// accept a web page on the server we asked, never a file, a UNC path or
+	// a program a hostile server might name.
+	if u, err := url.Parse(start.URL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host != hostOf(server) {
+		return fail(e, 1, "the server sent an unexpected sign-in link: %q", printable(start.URL))
+	}
 
 	fmt.Fprintf(e.Stdout, "\n  Open this page, sign in, and allow %q:\n\n    %s\n\n  Check it shows this code:  %s\n\n", device, start.URL, start.UserCode)
 	if !*noBrowser && e.OpenBrowser != nil {
@@ -128,6 +135,15 @@ func cmdLogin(ctx context.Context, e Env, args []string) int {
 			return fail(e, 1, "%v", err)
 		}
 	}
+}
+
+// hostOf is the host[:port] of a server URL.
+func hostOf(server string) string {
+	u, err := url.Parse(server)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // loginClient is an HTTP client that, like the agent, honours

@@ -239,12 +239,28 @@ func (e Env) executable() (string, error) {
 }
 
 func (e Env) get(ctx context.Context, url string) (*http.Response, error) {
+	return e.getWith(ctx, e.httpClient(), url)
+}
+
+// downloadClient fetches the binary: a slow link may take minutes for the
+// whole body, so only the wait for the response headers is bounded here
+// (download bounds the total).
+func (e Env) downloadClient() *http.Client {
+	if e.HTTPClient != nil {
+		return e.HTTPClient
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = 60 * time.Second
+	return &http.Client{Transport: tr}
+}
+
+func (e Env) getWith(ctx context.Context, c *http.Client, url string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "mancar/"+version.Version)
-	resp, err := e.httpClient().Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +273,9 @@ func (e Env) get(ctx context.Context, url string) (*http.Response, error) {
 
 // download writes url to a temporary file in dir and checks its SHA-256.
 func (e Env) download(ctx context.Context, url, dir, wantSum string) (string, error) {
-	resp, err := e.get(ctx, url)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	resp, err := e.getWith(ctx, e.downloadClient(), url)
 	if err != nil {
 		return "", err
 	}

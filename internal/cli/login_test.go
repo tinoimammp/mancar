@@ -105,3 +105,21 @@ func TestLoginUsage(t *testing.T) {
 		t.Errorf("plain http to a public host: %+v", r)
 	}
 }
+
+// A hostile server must not get mancar login to open a local file, a
+// network share or another site in the browser.
+func TestLoginRefusesForeignLinks(t *testing.T) {
+	for _, link := range []string{"file:///etc/passwd", `\\evil\share\run.exe`, "https://evil.example.net/x", "calc.exe"} {
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /api/v1/auth/device", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{"device_code": "dc", "user_code": "ACDE-FGHJ", "verification_url": link, "interval": 1, "expires_in": 600})
+		})
+		srv := httptest.NewServer(mux)
+		m := newMachine(t, map[string]string{"MANCAR_DIAL_ADDR": ""})
+		r, opened := runLogin(t, m, srv.URL, "--name", "test-box")
+		srv.Close()
+		if r.code == 0 || len(opened) != 0 || !strings.Contains(r.stderr, "unexpected sign-in link") {
+			t.Errorf("%s: exit %d, opened %v, stderr %q", link, r.code, opened, r.stderr)
+		}
+	}
+}

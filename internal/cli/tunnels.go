@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tinoimammp/mancar/internal/agent"
 	"github.com/tinoimammp/mancar/internal/protocol"
@@ -263,6 +264,10 @@ func runTunnels(ctx context.Context, e Env, s settings, specs []agent.TunnelSpec
 }
 
 func describeRegistrationError(r *agent.RegistrationError) string {
+	return printable(describeRegistrationErrorRaw(r)) // the message comes from the server
+}
+
+func describeRegistrationErrorRaw(r *agent.RegistrationError) string {
 	switch r.Err.Code {
 	case protocol.CodeHostnameTaken:
 		if r.Spec.Subdomain != "" {
@@ -410,7 +415,7 @@ func (r *renderer) onEvent(spec agent.TunnelSpec, ev protocol.Event) {
 		prefix = l + "  "
 	}
 	if spec.Proto == protocol.ProtoTCP {
-		fmt.Fprintf(r.out, "%s  %sTCP   %-21s  %s in / %s out  %s\n", ts, prefix, ev.Remote,
+		fmt.Fprintf(r.out, "%s  %sTCP   %-21s  %s in / %s out  %s\n", ts, prefix, printable(ev.Remote),
 			humanBytes(ev.BytesIn), humanBytes(ev.BytesOut), humanDuration(ev.DurationMs))
 		return
 	}
@@ -418,7 +423,7 @@ func (r *renderer) onEvent(spec agent.TunnelSpec, ev protocol.Event) {
 	if txt := http.StatusText(ev.Status); txt != "" {
 		status += " " + txt
 	}
-	fmt.Fprintf(r.out, "%s  %s%-6s %-40s %-24s %s\n", ts, prefix, ev.Method, clip(ev.Path, 40), status, humanDuration(ev.DurationMs))
+	fmt.Fprintf(r.out, "%s  %s%-6s %-40s %-24s %s\n", ts, prefix, printable(ev.Method), clip(printable(ev.Path), 40), status, humanDuration(ev.DurationMs))
 }
 
 func (r *renderer) header() {
@@ -443,6 +448,18 @@ func (r *renderer) flushSummary() {
 		r.flushTimer.Stop()
 		r.flushTimer = nil
 	}
+}
+
+// printable replaces control characters (and invalid UTF-8) in text that
+// comes from the internet, such as request paths ("/%1b]0;..." decodes to an
+// escape sequence), so it cannot rewrite the terminal or fake log lines.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == utf8.RuneError {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 func clip(s string, n int) string {
@@ -555,7 +572,7 @@ func tlsLabel(t agent.TunnelStatus) string {
 }
 
 func oneLine(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
+	s = printable(strings.Join(strings.Fields(s), " "))
 	if len(s) > 160 {
 		s = s[:157] + "..."
 	}
