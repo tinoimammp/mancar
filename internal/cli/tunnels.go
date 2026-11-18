@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 	random := fs.Bool("random", false, "use a random subdomain (http only)")
 	last := fs.Bool("last", false, "reuse the subdomain used most recently with this server (http only)")
 	private := fs.Bool("private", false, "only you can open it, after signing in to the dashboard (http only)")
+	allowFlag := fs.String("allow", "", "also let these accounts open it, e.g. budi,ana@example.com (implies --private)")
 	quiet := fs.Bool("quiet", false, "do not print the request log")
 	logFlag := fs.String("log", logSmart, "request log: smart (summarise static files), all, errors")
 	pos, err := parseFlags(fs, args)
@@ -37,10 +39,14 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 		return fail(e, 2, "%v", err)
 	}
 	if len(pos) != 1 {
-		return fail(e, 2, "usage: mancar %s PORT|HOST:PORT%s", proto, map[bool]string{true: " [--subdomain NAME | --random] [--private]"}[proto == protocol.ProtoHTTP])
+		return fail(e, 2, "usage: mancar %s PORT|HOST:PORT%s", proto, map[bool]string{true: " [--subdomain NAME | --random] [--private] [--allow USERS]"}[proto == protocol.ProtoHTTP])
 	}
-	if proto == protocol.ProtoTCP && (*subdomain != "" || *random || *last || *private) {
-		return fail(e, 2, "--subdomain, --random, --last and --private only apply to http tunnels")
+	if proto == protocol.ProtoTCP && (*subdomain != "" || *random || *last || *private || *allowFlag != "") {
+		return fail(e, 2, "--subdomain, --random, --last, --private and --allow only apply to http tunnels")
+	}
+	allow, err := parseAllow(*allowFlag)
+	if err != nil {
+		return fail(e, 2, "%v", err)
 	}
 	if n := btoi(*subdomain != "") + btoi(*random) + btoi(*last); n > 1 {
 		return fail(e, 2, "--subdomain, --random and --last cannot be combined")
@@ -82,7 +88,7 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 			return fail(e, 1, "no input; aborting")
 		}
 	}
-	spec := agent.TunnelSpec{Proto: proto, LocalAddr: addr, Subdomain: label, Private: *private}
+	spec := agent.TunnelSpec{Proto: proto, LocalAddr: addr, Subdomain: label, Private: *private || len(allow) > 0, Allow: allow}
 	if label != "" {
 		fmt.Fprintln(e.Stdout, "Checking availability...")
 	}
@@ -267,6 +273,10 @@ func describeRegistrationError(r *agent.RegistrationError) string {
 		return "invalid subdomain: " + r.Err.Message
 	case protocol.CodeLimitExceeded:
 		return "limit reached: " + r.Err.Message
+	case protocol.CodeBadRequest:
+		if len(r.Spec.Allow) > 0 {
+			return "--allow: " + r.Err.Message
+		}
 	case protocol.CodeUnsupported:
 		if r.Spec.Private {
 			return r.Err.Message
@@ -519,7 +529,10 @@ func printOnline(w io.Writer, ts []agent.TunnelStatus, first bool) {
 	}
 	for _, t := range ts {
 		fmt.Fprintf(w, "%s\n    -> %s://%s\n", t.Registered.PublicURL, t.Spec.Proto, t.Spec.LocalAddr)
-		if t.Registered.Private {
+		switch {
+		case t.Registered.Private && len(t.Registered.Allow) > 0:
+			fmt.Fprintf(w, "    Private: you and %s can open it, after signing in to the dashboard\n", strings.Join(t.Registered.Allow, ", "))
+		case t.Registered.Private:
 			fmt.Fprintln(w, "    Private: only you can open it, after signing in to the dashboard")
 		}
 		if multi {
@@ -559,4 +572,25 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// parseAllow reads --allow: usernames or email addresses separated by
+// commas, without duplicates.
+func parseAllow(s string) ([]string, error) {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		v = strings.ToLower(strings.TrimSpace(v))
+		switch {
+		case v == "":
+			continue
+		case len(v) > 254 || strings.ContainsAny(v, " \t/\\"):
+			return nil, fmt.Errorf("--allow: %q is not a username or email address", v)
+		case !slices.Contains(out, v):
+			out = append(out, v)
+		}
+	}
+	if len(out) > 20 {
+		return nil, fmt.Errorf("--allow: at most 20 accounts")
+	}
+	return out, nil
 }

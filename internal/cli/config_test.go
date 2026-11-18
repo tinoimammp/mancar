@@ -158,8 +158,11 @@ func TestConfigTunnels(t *testing.T) {
 	if r := m.run("config", "add-tunnel", "admin", "http", "8080", "--private"); r.code != 0 {
 		t.Fatalf("%+v", r)
 	}
+	if r := m.run("config", "add-tunnel", "shared", "http", "8081", "--allow", "Budi, ana@example.com,budi"); r.code != 0 {
+		t.Fatalf("%+v", r)
+	}
 	show := m.run("config").stdout
-	for _, want := range []string{"web: http localhost:3000 subdomain=my-app", "db: tcp 127.0.0.1:5432", "admin: http localhost:8080 private"} {
+	for _, want := range []string{"web: http localhost:3000 subdomain=my-app", "db: tcp 127.0.0.1:5432", "admin: http localhost:8080 private", "shared: http localhost:8081 private allow=budi,ana@example.com"} {
 		if !strings.Contains(show, want) {
 			t.Errorf("show is missing %q:\n%s", want, show)
 		}
@@ -173,7 +176,9 @@ func TestConfigTunnels(t *testing.T) {
 		{[]string{"x", "udp", "3000"}, "http or tcp"},
 		{[]string{"x", "http", "nope"}, "not a valid local address"},
 		{[]string{"x", "tcp", "3000", "--subdomain", "abc-def"}, "only applies to http"},
-		{[]string{"x", "tcp", "3000", "--private"}, "only applies to http"},
+		{[]string{"x", "tcp", "3000", "--private"}, "only apply to http"},
+		{[]string{"x", "tcp", "3000", "--allow", "budi"}, "only apply to http"},
+		{[]string{"x", "http", "3000", "--allow", "a b"}, "not a username"},
 		{[]string{"x", "http", "3000", "--subdomain", "ab"}, "3-63"},
 		{[]string{"web", "http", "4000"}, "already exists"},
 	}

@@ -115,7 +115,7 @@ const usageText = `mancar - expose local services through your own tunnel gatewa
 
 Usage:
   mancar login [SERVER] [--name NAME]  sign this computer in from the dashboard (saves a token)
-  mancar http PORT|HOST:PORT [--subdomain NAME | --random | --last] [--private]
+  mancar http PORT|HOST:PORT [--subdomain NAME | --random | --last] [--private] [--allow USERS]
   mancar tcp  PORT|HOST:PORT
   mancar start [NAME...]            start the tunnels saved with "config add-tunnel"
   mancar status                     list running tunnels
@@ -124,7 +124,7 @@ Usage:
   mancar config set server URL      for example https://tunnel.example.com
   mancar config set token TOKEN     or "-" to read the token from stdin
   mancar config unset server|token
-  mancar config add-tunnel NAME http|tcp ADDR [--subdomain NAME] [--private]
+  mancar config add-tunnel NAME http|tcp ADDR [--subdomain NAME] [--private] [--allow USERS]
   mancar config rm-tunnel NAME
   mancar config path
   mancar update [--check]           install the latest release (verified with SHA256SUMS)
@@ -136,6 +136,7 @@ request, --log errors only 4xx/5xx, --quiet nothing.
 
 --private makes an http tunnel open only for you: visitors are sent to the
 dashboard to sign in, and only the account that owns the token gets in.
+--allow budi,ana@example.com lets those accounts in too (implies --private).
 
 Environment:
   MANCAR_SERVER            gateway URL (overrides the config file; --server overrides both)
