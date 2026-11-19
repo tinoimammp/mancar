@@ -115,7 +115,7 @@ const usageText = `mancar - expose local services through your own tunnel gatewa
 
 Usage:
   mancar login [SERVER] [--name NAME]  sign this computer in from the dashboard (saves a token)
-  mancar http PORT|HOST:PORT [--subdomain NAME | --random | --last] [--private] [--allow USERS]
+  mancar http PORT|HOST:PORT [--subdomain NAME | --random | --last] [--private] [--allow USERS] [--auth USER:PASS]
   mancar tcp  PORT|HOST:PORT
   mancar start [NAME...]            start the tunnels saved with "config add-tunnel"
   mancar status                     list running tunnels
@@ -124,7 +124,7 @@ Usage:
   mancar config set server URL      for example https://tunnel.example.com
   mancar config set token TOKEN     or "-" to read the token from stdin
   mancar config unset server|token
-  mancar config add-tunnel NAME http|tcp ADDR [--subdomain NAME] [--private] [--allow USERS]
+  mancar config add-tunnel NAME http|tcp ADDR [--subdomain NAME] [--private] [--allow USERS] [--auth USER:PASS]
   mancar config rm-tunnel NAME
   mancar config path
   mancar update [--check]           install the latest release (verified with SHA256SUMS)
@@ -137,10 +137,14 @@ request, --log errors only 4xx/5xx, --quiet nothing.
 --private makes an http tunnel open only for you: visitors are sent to the
 dashboard to sign in, and only the account that owns the token gets in.
 --allow budi,ana@example.com lets those accounts in too (implies --private).
+--auth USER:PASS puts a password in front of an http tunnel for people without
+an account (the browser asks for it). Give only USER to read the password from
+MANCAR_AUTH_PASSWORD, which keeps it out of your shell history.
 
 Environment:
   MANCAR_SERVER            gateway URL (overrides the config file; --server overrides both)
   MANCAR_TOKEN             agent token (overrides the config file)
+  MANCAR_AUTH_PASSWORD     password for --auth USER
   MANCAR_NO_UPDATE_CHECK=1 do not look for or announce new releases
 
 Easiest start: mancar login https://tunnel.example.com

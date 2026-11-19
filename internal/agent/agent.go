@@ -43,6 +43,8 @@ type TunnelSpec struct {
 	Subdomain string   `json:"subdomain,omitempty"` // empty = random (HTTP only)
 	Private   bool     `json:"private,omitempty"`   // only the owner can open it (HTTP only)
 	Allow     []string `json:"allow,omitempty"`     // other accounts that may open it too (needs Private)
+	// Auth is "user:password": visitors must log in with it (HTTP only).
+	Auth string `json:"auth,omitempty"`
 }
 
 // Options configures an Agent.
@@ -311,14 +313,14 @@ func (a *Agent) registerAll(sess *yamux.Session) ([]TunnelStatus, error) {
 		if a.assigned[i] != "" {
 			label = a.assigned[i] // keep the same public name across reconnects
 		}
-		m, err := call(i, protocol.Register{Proto: spec.Proto, Subdomain: label, Private: spec.Private, Allow: spec.Allow})
+		m, err := call(i, protocol.Register{Proto: spec.Proto, Subdomain: label, Private: spec.Private, Allow: spec.Allow, Auth: basicAuth(spec.Auth)})
 		if err != nil {
 			return nil, err
 		}
 		if m.Type == protocol.TypeError && m.Error != nil && m.Error.Code == protocol.CodeHostnameTaken &&
 			spec.Subdomain == "" && label != "" {
 			// Our previous random name was taken meanwhile: get a new one.
-			if m, err = call(i, protocol.Register{Proto: spec.Proto, Private: spec.Private, Allow: spec.Allow}); err != nil {
+			if m, err = call(i, protocol.Register{Proto: spec.Proto, Private: spec.Private, Allow: spec.Allow, Auth: basicAuth(spec.Auth)}); err != nil {
 				return nil, err
 			}
 		}
@@ -334,6 +336,12 @@ func (a *Agent) registerAll(sess *yamux.Session) ([]TunnelStatus, error) {
 			// The caller closes the session, which removes the tunnel.
 			return nil, &RegistrationError{Spec: spec, Err: &protocol.Error{Code: protocol.CodeUnsupported,
 				Message: "this server does not support private tunnels; update it, or run without --private"}}
+		}
+		if spec.Auth != "" && !m.Registered.Auth {
+			// An older gateway ignored "auth": never serve it without the
+			// password. The caller closes the session, which removes it.
+			return nil, &RegistrationError{Spec: spec, Err: &protocol.Error{Code: protocol.CodeUnsupported,
+				Message: "this server does not support --auth; update it, or run without --auth"}}
 		}
 		if len(spec.Allow) > 0 && len(m.Registered.Allow) == 0 {
 			// An older gateway ignored "allow" (the tunnel would be the
@@ -443,4 +451,13 @@ func (a *Agent) readEvents(st net.Conn, tunnels map[string]TunnelSpec) {
 			a.opts.OnEvent(spec, ev)
 		}
 	}
+}
+
+// basicAuth turns "user:password" into the register payload (nil when empty).
+func basicAuth(s string) *protocol.BasicAuth {
+	if s == "" {
+		return nil
+	}
+	user, password, _ := strings.Cut(s, ":")
+	return &protocol.BasicAuth{User: user, Password: password}
 }

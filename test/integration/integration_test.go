@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -600,4 +601,54 @@ func TestTCPTunnelsArePerAccount(t *testing.T) {
 	}
 	// another account still gets ports
 	e.startAgent(e.token("bob"), "", tcp).waitOnline(t)
+}
+
+// --auth: a password in front of the tunnel, checked by the gateway; the
+// app never sees the credentials.
+func TestTunnelBehindAPassword(t *testing.T) {
+	e := newEnv(t, nil)
+	spec := httpSpec(echoServer(t, "one").URL, "")
+	spec.Auth = "klien:rahasia123"
+	tun := e.startAgent(e.token("alice"), "", spec).waitOnline(t)[0].Registered
+	if !tun.Auth {
+		t.Fatal("registered without auth")
+	}
+	basic := func(user, pw string) map[string]string {
+		return map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pw))}
+	}
+	resp, _ := e.do("GET", tun.Hostname, "/", nil, nil)
+	if resp.StatusCode != http.StatusUnauthorized || !strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Basic ") {
+		t.Errorf("no password: %d %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
+	}
+	if resp, _ := e.do("GET", tun.Hostname, "/", nil, basic("klien", "wrong-password")); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("wrong password: %d", resp.StatusCode)
+	}
+	resp, body := e.do("POST", tun.Hostname, "/api", strings.NewReader("x"), basic("klien", "rahasia123"))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("right password: %d %s", resp.StatusCode, body)
+	}
+	var got echo
+	json.Unmarshal(body, &got)
+	if got.Header.Get("Authorization") != "" {
+		t.Error("the app received the credentials")
+	}
+	// guessing is cut off
+	for i := 0; i < 20; i++ {
+		e.do("GET", tun.Hostname, "/", nil, basic("klien", fmt.Sprintf("guess-%02d-x", i)))
+	}
+	if resp, _ := e.do("GET", tun.Hostname, "/", nil, basic("klien", "rahasia123")); resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("after 20 wrong guesses: %d", resp.StatusCode)
+	}
+}
+
+func TestPasswordRules(t *testing.T) {
+	e := newEnv(t, nil)
+	for name, spec := range map[string]agent.TunnelSpec{
+		"short password": {Proto: protocol.ProtoHTTP, LocalAddr: "127.0.0.1:1", Auth: "klien:short"},
+		"tcp":            {Proto: protocol.ProtoTCP, LocalAddr: "127.0.0.1:1", Auth: "klien:rahasia123"},
+	} {
+		if code := registrationCode(e.startAgent(e.token("alice"), "", spec).waitExit(t)); code == "" || strings.HasPrefix(code, "not a") {
+			t.Errorf("%s: %s", name, code)
+		}
+	}
 }

@@ -88,3 +88,18 @@ func TestAllowIsNotSilentlyDroppedByAnOlderGateway(t *testing.T) {
 		t.Errorf("register = %+v", reg)
 	}
 }
+
+func TestPasswordIsNeverDroppedByAnOlderGateway(t *testing.T) {
+	got := make(chan protocol.Register, 4)
+	srv := gatewayAnswering(t, got, true)
+	o := baseOpts(srv.URL)
+	o.Tunnels = []agent.TunnelSpec{{Proto: protocol.ProtoHTTP, LocalAddr: "127.0.0.1:3000", Auth: "klien:rahasia123"}}
+	_, errc := start(t, o)
+	var re *agent.RegistrationError
+	if err := waitErr(t, errc); !errors.As(err, &re) || re.Err.Code != protocol.CodeUnsupported {
+		t.Fatalf("Run = %v, want an unsupported registration error", err)
+	}
+	if reg := <-got; reg.Auth == nil || reg.Auth.User != "klien" || reg.Auth.Password != "rahasia123" {
+		t.Errorf("register = %+v", reg.Auth)
+	}
+}

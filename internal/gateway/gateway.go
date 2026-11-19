@@ -142,6 +142,8 @@ type Tunnel struct {
 	// username), may open it (checked by the router).
 	Private bool
 	Allow   map[string]string
+	// BasicAuth: visitors must send these credentials (--auth); nil = none.
+	BasicAuth *BasicAuthCheck
 
 	sess  *session
 	lease domain.Lease
@@ -292,6 +294,7 @@ type TunnelInfo struct {
 	CreatedAt   time.Time `json:"created_at"`
 	ActiveConns int       `json:"active_connections"`
 	Private     bool      `json:"private,omitempty"`
+	Auth        bool      `json:"auth,omitempty"`        // behind a password (--auth)
 	SharedWith  []string  `json:"shared_with,omitempty"` // usernames besides the owner
 	AllowIDs    []string  `json:"-"`                     // their account IDs
 }
@@ -321,7 +324,7 @@ func (h *Hub) Sessions() []SessionInfo {
 		for _, t := range s.tunnels {
 			ti := TunnelInfo{
 				ID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port,
-				PublicURL: t.PublicURL, CreatedAt: t.CreatedAt, ActiveConns: len(t.sem), Private: t.Private,
+				PublicURL: t.PublicURL, CreatedAt: t.CreatedAt, ActiveConns: len(t.sem), Private: t.Private, Auth: t.BasicAuth != nil,
 			}
 			for id, name := range t.Allow {
 				if id != t.UserID {
@@ -690,6 +693,19 @@ func (h *Hub) register(s *session, reg *protocol.Register) *protocol.Message {
 	if n >= h.opts.MaxTunnelsPerSession {
 		return errMsg(protocol.CodeLimitExceeded, "at most %d tunnels per agent", h.opts.MaxTunnelsPerSession)
 	}
+	var basic *BasicAuthCheck
+	if reg.Auth != nil {
+		var err error
+		switch {
+		case reg.Proto != protocol.ProtoHTTP:
+			return errMsg(protocol.CodeUnsupported, "only http tunnels can have a password")
+		case reg.Private:
+			return errMsg(protocol.CodeBadRequest, "a tunnel is either private or behind a password, not both")
+		}
+		if basic, err = NewBasicAuthCheck(reg.Auth.User, reg.Auth.Password); err != nil {
+			return errMsg(protocol.CodeBadRequest, "%s", err.Error())
+		}
+	}
 	if reg.Private && reg.Proto != protocol.ProtoHTTP {
 		return errMsg(protocol.CodeUnsupported, "only http tunnels can be private")
 	}
@@ -719,7 +735,7 @@ func (h *Hub) register(s *session, reg *protocol.Register) *protocol.Message {
 		}
 	}
 	t := &Tunnel{
-		ID: randomID(12), Proto: reg.Proto, UserID: s.userID, CreatedAt: time.Now(), Private: reg.Private, Allow: allow,
+		ID: randomID(12), Proto: reg.Proto, UserID: s.userID, CreatedAt: time.Now(), Private: reg.Private, Allow: allow, BasicAuth: basic,
 		sess: s, sem: make(chan struct{}, h.opts.MaxConnsPerTunnel),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -786,7 +802,7 @@ func (h *Hub) register(s *session, reg *protocol.Register) *protocol.Message {
 	}
 	sort.Strings(names)
 	return &protocol.Message{Type: protocol.TypeRegistered, Registered: &protocol.Registered{
-		TunnelID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port, PublicURL: t.PublicURL, Private: t.Private, Allow: names,
+		TunnelID: t.ID, Proto: t.Proto, Hostname: t.Hostname, Port: t.Port, PublicURL: t.PublicURL, Private: t.Private, Allow: names, Auth: t.BasicAuth != nil,
 	}}
 }
 

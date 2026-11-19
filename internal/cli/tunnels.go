@@ -29,6 +29,7 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 	last := fs.Bool("last", false, "reuse the subdomain used most recently with this server (http only)")
 	private := fs.Bool("private", false, "only you can open it, after signing in to the dashboard (http only)")
 	allowFlag := fs.String("allow", "", "also let these accounts open it, e.g. budi,ana@example.com (implies --private)")
+	authFlag := fs.String("auth", "", "visitors log in with USER:PASSWORD, or USER with the password in MANCAR_AUTH_PASSWORD (http only)")
 	quiet := fs.Bool("quiet", false, "do not print the request log")
 	logFlag := fs.String("log", logSmart, "request log: smart (summarise static files), all, errors")
 	pos, err := parseFlags(fs, args)
@@ -40,10 +41,17 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 		return fail(e, 2, "%v", err)
 	}
 	if len(pos) != 1 {
-		return fail(e, 2, "usage: mancar %s PORT|HOST:PORT%s", proto, map[bool]string{true: " [--subdomain NAME | --random] [--private] [--allow USERS]"}[proto == protocol.ProtoHTTP])
+		return fail(e, 2, "usage: mancar %s PORT|HOST:PORT%s", proto, map[bool]string{true: " [--subdomain NAME | --random | --last] [--private] [--allow USERS] [--auth USER[:PASSWORD]]"}[proto == protocol.ProtoHTTP])
 	}
-	if proto == protocol.ProtoTCP && (*subdomain != "" || *random || *last || *private || *allowFlag != "") {
-		return fail(e, 2, "--subdomain, --random, --last, --private and --allow only apply to http tunnels")
+	if proto == protocol.ProtoTCP && (*subdomain != "" || *random || *last || *private || *allowFlag != "" || *authFlag != "") {
+		return fail(e, 2, "--subdomain, --random, --last, --private, --allow and --auth only apply to http tunnels")
+	}
+	auth, err := parseAuth(e, *authFlag)
+	if err != nil {
+		return fail(e, 2, "%v", err)
+	}
+	if auth != "" && (*private || *allowFlag != "") {
+		return fail(e, 2, "--auth cannot be combined with --private or --allow: a tunnel is either private or behind a password")
 	}
 	allow, err := parseAllow(*allowFlag)
 	if err != nil {
@@ -89,7 +97,7 @@ func cmdTunnel(ctx context.Context, e Env, proto string, args []string) int {
 			return fail(e, 1, "no input; aborting")
 		}
 	}
-	spec := agent.TunnelSpec{Proto: proto, LocalAddr: addr, Subdomain: label, Private: *private || len(allow) > 0, Allow: allow}
+	spec := agent.TunnelSpec{Proto: proto, LocalAddr: addr, Subdomain: label, Private: *private || len(allow) > 0, Allow: allow, Auth: auth}
 	if label != "" {
 		fmt.Fprintln(e.Stdout, "Checking availability...")
 	}
@@ -282,8 +290,11 @@ func describeRegistrationErrorRaw(r *agent.RegistrationError) string {
 		if len(r.Spec.Allow) > 0 {
 			return "--allow: " + r.Err.Message
 		}
+		if r.Spec.Auth != "" {
+			return "--auth: " + r.Err.Message
+		}
 	case protocol.CodeUnsupported:
-		if r.Spec.Private {
+		if r.Spec.Private || r.Spec.Auth != "" {
 			return r.Err.Message
 		}
 		return fmt.Sprintf("this gateway does not support %s tunnels: %s", r.Spec.Proto, r.Err.Message)
@@ -551,6 +562,9 @@ func printOnline(w io.Writer, ts []agent.TunnelStatus, first bool) {
 			fmt.Fprintf(w, "    Private: you and %s can open it, after signing in to the dashboard\n", strings.Join(t.Registered.Allow, ", "))
 		case t.Registered.Private:
 			fmt.Fprintln(w, "    Private: only you can open it, after signing in to the dashboard")
+		case t.Registered.Auth:
+			user, _, _ := strings.Cut(t.Spec.Auth, ":")
+			fmt.Fprintf(w, "    Password: visitors log in as %q with the password you set\n", user)
 		}
 		if multi {
 			fmt.Fprintf(w, "    Protocol: %s   TLS: %s\n", strings.ToUpper(t.Spec.Proto), tlsLabel(t))
@@ -610,4 +624,30 @@ func parseAllow(s string) ([]string, error) {
 		return nil, fmt.Errorf("--allow: at most 20 accounts")
 	}
 	return out, nil
+}
+
+// minAuthPassword mirrors the gateway's minimum, to fail before connecting.
+const minAuthPassword = 8
+
+// parseAuth reads --auth: "user:password", or "user" with the password in
+// MANCAR_AUTH_PASSWORD (which keeps it out of the process list and the
+// shell history). It returns "user:password", or "" without --auth.
+func parseAuth(e Env, s string) (string, error) {
+	if s == "" {
+		return "", nil
+	}
+	user, password, hasPassword := strings.Cut(s, ":")
+	if !hasPassword {
+		password = e.Getenv("MANCAR_AUTH_PASSWORD")
+		if password == "" {
+			return "", errors.New("--auth: give USER:PASSWORD, or set MANCAR_AUTH_PASSWORD and give USER")
+		}
+	}
+	switch {
+	case user == "" || len(user) > 64:
+		return "", errors.New("--auth: the user name must be 1-64 characters")
+	case len([]rune(password)) < minAuthPassword:
+		return "", fmt.Errorf("--auth: the password must be at least %d characters", minAuthPassword)
+	}
+	return user + ":" + password, nil
 }

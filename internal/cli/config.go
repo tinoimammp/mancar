@@ -35,6 +35,7 @@ type savedTunnel struct {
 	Subdomain string   `json:"subdomain,omitempty"`
 	Private   bool     `json:"private,omitempty"`
 	Allow     []string `json:"allow,omitempty"`
+	Auth      string   `json:"auth,omitempty"` // "user:password" (the file is private to you)
 }
 
 func (e Env) configPath() (string, error) {
@@ -243,7 +244,7 @@ func checkSubdomain(s string) (string, error) {
 }
 
 func (t savedTunnel) spec() agent.TunnelSpec {
-	return agent.TunnelSpec{Name: t.Name, Proto: t.Proto, LocalAddr: t.Addr, Subdomain: t.Subdomain, Private: t.Private || len(t.Allow) > 0, Allow: t.Allow}
+	return agent.TunnelSpec{Name: t.Name, Proto: t.Proto, LocalAddr: t.Addr, Subdomain: t.Subdomain, Private: t.Private || len(t.Allow) > 0, Allow: t.Allow, Auth: t.Auth}
 }
 
 var tunnelNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
@@ -255,6 +256,7 @@ func cmdConfig(e Env, args []string) int {
 	subdomain := fs.String("subdomain", "", "subdomain for an http tunnel (add-tunnel)")
 	private := fs.Bool("private", false, "only you can open the http tunnel, after signing in (add-tunnel)")
 	allowFlag := fs.String("allow", "", "also let these accounts open the private tunnel (add-tunnel; implies --private)")
+	authFlag := fs.String("auth", "", "visitors log in with USER:PASSWORD (add-tunnel; stored in the config file)")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return flagExit(err)
@@ -263,8 +265,8 @@ func cmdConfig(e Env, args []string) int {
 	if len(pos) > 0 {
 		sub, pos = pos[0], pos[1:]
 	}
-	if sub != "add-tunnel" && (*subdomain != "" || *private || *allowFlag != "") {
-		return fail(e, 2, "--subdomain, --private and --allow only apply to: mancar config add-tunnel")
+	if sub != "add-tunnel" && (*subdomain != "" || *private || *allowFlag != "" || *authFlag != "") {
+		return fail(e, 2, "--subdomain, --private, --allow and --auth only apply to: mancar config add-tunnel")
 	}
 
 	if sub == "path" {
@@ -307,6 +309,10 @@ func cmdConfig(e Env, args []string) int {
 			}
 			if t.Private {
 				extra += " private"
+			}
+			if t.Auth != "" {
+				user, _, _ := strings.Cut(t.Auth, ":")
+				extra += " auth=" + user + ":***"
 			}
 			if len(t.Allow) > 0 {
 				extra += " allow=" + strings.Join(t.Allow, ",")
@@ -368,7 +374,7 @@ func cmdConfig(e Env, args []string) int {
 
 	case "add-tunnel":
 		if len(pos) != 3 {
-			return fail(e, 2, "usage: mancar config add-tunnel NAME http|tcp ADDR [--subdomain NAME] [--private] [--allow USERS]")
+			return fail(e, 2, "usage: mancar config add-tunnel NAME http|tcp ADDR [--subdomain NAME] [--private] [--allow USERS] [--auth USER:PASS]")
 		}
 		name, proto := strings.ToLower(pos[0]), strings.ToLower(pos[1])
 		if !tunnelNameRE.MatchString(name) {
@@ -385,7 +391,17 @@ func cmdConfig(e Env, args []string) int {
 		if err != nil {
 			return fail(e, 2, "%v", err)
 		}
-		t := savedTunnel{Name: name, Proto: proto, Addr: addr, Private: *private || len(allow) > 0, Allow: allow}
+		auth, err := parseAuth(e, *authFlag)
+		if err != nil {
+			return fail(e, 2, "%v", err)
+		}
+		if auth != "" && (*private || len(allow) > 0) {
+			return fail(e, 2, "--auth cannot be combined with --private or --allow")
+		}
+		if auth != "" && proto != protocol.ProtoHTTP {
+			return fail(e, 2, "--auth only applies to http tunnels")
+		}
+		t := savedTunnel{Name: name, Proto: proto, Addr: addr, Private: *private || len(allow) > 0, Allow: allow, Auth: auth}
 		if t.Private && proto != protocol.ProtoHTTP {
 			return fail(e, 2, "--private and --allow only apply to http tunnels")
 		}

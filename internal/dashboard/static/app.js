@@ -1216,10 +1216,10 @@ function renderOverview(o) {
 function tunnelCell(t, subtitle) {
   const isHTTP = t.proto === "http";
   return cell({
-    avatar: t.private ? "lock" : isHTTP ? "link" : "terminal",
+    avatar: t.private || t.auth ? "lock" : isHTTP ? "link" : "terminal",
     title: t.public_url.replace(/^https?:\/\//, ""),
     mono: true,
-    subtitle: [t.proto.toUpperCase(), t.private ? (t.shared_with ? `Private, with ${t.shared_with.join(", ")}` : "Private") : null, subtitle, t.active_connections ? `${t.active_connections} open` : null].filter(Boolean).join(" · "),
+    subtitle: [t.proto.toUpperCase(), t.private ? (t.shared_with ? `Private, with ${t.shared_with.join(", ")}` : "Private") : t.auth ? "Password" : null, subtitle, t.active_connections ? `${t.active_connections} open` : null].filter(Boolean).join(" · "),
     trailing: h(
       "span",
       { class: "row" },

@@ -49,6 +49,9 @@ func TestUsageErrors(t *testing.T) {
 		{"tcp with subdomain", []string{"tcp", port, "--subdomain", "x-y-z"}, "only apply to http"},
 		{"tcp with random", []string{"tcp", port, "--random"}, "only apply to http"},
 		{"tcp private", []string{"tcp", port, "--private"}, "only apply to http"},
+		{"tcp auth", []string{"tcp", port, "--auth", "klien:rahasia123"}, "only apply to http"},
+		{"auth and private", []string{"http", port, "--auth", "klien:rahasia123", "--private"}, "cannot be combined"},
+		{"short password", []string{"http", port, "--auth", "klien:short"}, "at least 8"},
 		{"unknown flag", []string{"http", port, "--bogus"}, "flag provided but not defined"},
 	}
 	for _, tc := range cases {

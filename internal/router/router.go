@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/tinoimammp/mancar/internal/inspect"
 	"github.com/tinoimammp/mancar/internal/netutil"
 	"github.com/tinoimammp/mancar/internal/protocol"
+	"github.com/tinoimammp/mancar/internal/ratelimit"
 )
 
 // Tunnels is the part of the gateway the router needs.
@@ -88,6 +90,9 @@ type Router struct {
 	opts  Options
 	proxy *httputil.ReverseProxy
 	log   *slog.Logger
+	// authFails counts wrong passwords per tunnel host and client address
+	// (tunnels behind --auth), so a password cannot be guessed at speed.
+	authFails *ratelimit.FailureLimiter
 }
 
 const upstreamSuffix = ".tunnel.invalid"
@@ -115,7 +120,7 @@ func New(opts Options) *Router {
 		opts.ResponseHeaderTimeout = 2 * time.Minute
 	}
 	opts.BaseDomain = strings.ToLower(opts.BaseDomain)
-	rt := &Router{opts: opts, log: opts.Logger}
+	rt := &Router{opts: opts, log: opts.Logger, authFails: ratelimit.NewFailureLimiter(20, 10*time.Minute)}
 
 	transport := &http.Transport{
 		Proxy: nil,
@@ -190,7 +195,11 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if t.Private && !replay && !rt.letIn(w, r, host, t) {
 		return
 	}
-	info := &reqInfo{tunnel: t, client: netutil.ClientFromRequest(r, rt.opts.TrustedProxies)}
+	client := netutil.ClientFromRequest(r, rt.opts.TrustedProxies)
+	if t.BasicAuth != nil && !replay && !rt.checkPassword(w, r, host, client.IP, t.BasicAuth) {
+		return
+	}
+	info := &reqInfo{tunnel: t, client: client}
 	if rt.opts.MaxBodyBytes > 0 {
 		if r.ContentLength > rt.opts.MaxBodyBytes {
 			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds the configured limit.")
@@ -275,6 +284,43 @@ func (rt *Router) letIn(w http.ResponseWriter, r *http.Request, host string, t *
 	}
 	writeError(w, http.StatusUnauthorized, "private_tunnel", "This tunnel is private. Open it in a browser and sign in as its owner.")
 	return false
+}
+
+// checkPassword guards a tunnel behind --auth (HTTP Basic Auth). It
+// reports whether the request may go on; otherwise it has answered 401
+// (browsers then ask for the user name and password) or 429 after too many
+// wrong guesses. The Authorization header is removed before forwarding, so
+// neither the app nor the request inspector sees the password.
+func (rt *Router) checkPassword(w http.ResponseWriter, r *http.Request, host, clientIP string, check *gateway.BasicAuthCheck) bool {
+	key := host + "|" + rateKey(clientIP)
+	if retry, blocked := rt.authFails.Blocked(key); blocked {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		writeError(w, http.StatusTooManyRequests, "too_many_attempts", "Too many wrong passwords; try again later.")
+		return false
+	}
+	user, password, sent := r.BasicAuth()
+	if sent && check.Match(user, password) {
+		r.Header.Del("Authorization")
+		return true
+	}
+	if sent {
+		rt.authFails.Fail(key)
+	}
+	w.Header().Set("WWW-Authenticate", `Basic realm="`+host+`", charset="UTF-8"`)
+	w.Header().Set("Cache-Control", "no-store")
+	writeError(w, http.StatusUnauthorized, "password_required", "This tunnel needs a user name and password.")
+	return false
+}
+
+// rateKey groups an IPv6 address by its /64 (one customer usually holds a
+// whole /64); other addresses are used as they are.
+func rateKey(ip string) string {
+	if a, err := netip.ParseAddr(ip); err == nil && a.Is6() && !a.Is4In6() {
+		if p, err := a.Prefix(64); err == nil {
+			return p.String()
+		}
+	}
+	return ip
 }
 
 func (rt *Router) proxyError(w http.ResponseWriter, r *http.Request, err error) {

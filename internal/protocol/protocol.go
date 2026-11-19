@@ -90,6 +90,17 @@ type Register struct {
 	// Allow lets these accounts (usernames or email addresses) open a
 	// private tunnel too. Registered.Allow echoes them as usernames.
 	Allow []string `json:"allow,omitempty"`
+	// Auth puts an HTTP Basic Auth password in front of the tunnel: the
+	// gateway answers 401 until a visitor sends these credentials. Sent
+	// over the agent's TLS connection; the gateway keeps only a hash, in
+	// memory. Registered.Auth tells the agent it was applied.
+	Auth *BasicAuth `json:"auth,omitempty"`
+}
+
+// BasicAuth is the user name and password of Register.Auth.
+type BasicAuth struct {
+	User     string `json:"user"`
+	Password string `json:"password"`
 }
 
 // Registered confirms a tunnel.
@@ -101,6 +112,7 @@ type Registered struct {
 	PublicURL string   `json:"public_url"`
 	Private   bool     `json:"private,omitempty"`
 	Allow     []string `json:"allow,omitempty"`
+	Auth      bool     `json:"auth,omitempty"`
 }
 
 // Unregister removes one tunnel while keeping the session.
