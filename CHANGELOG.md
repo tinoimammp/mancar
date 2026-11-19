@@ -5,9 +5,17 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 `mancard` gateway for Linux, and the Docker images
 `ghcr.io/tinoimammp/mancar` and `ghcr.io/tinoimammp/mancar-edge`.
 
-## [Unreleased]
+## [v0.8.0] - 2026-11-19
 
 ### Added
+- **`--auth USER:PASSWORD`** puts a password in front of an http tunnel for
+  people without an account (HTTP Basic Auth, checked by the gateway; the app
+  never sees it; after 20 wrong tries from one address within 10 minutes it
+  refuses until that window ends). Also
+  for `config add-tunnel`; `--auth USER` takes the password from
+  `MANCAR_AUTH_PASSWORD`. The dashboard marks such tunnels "Password",
+  `mancar status` shows "(password)" and `mancar config` masks it as
+  `user:***`. Needs the server and the client at v0.8.0.
 - One-line client install that always takes the latest release and checks
   its checksum: `curl -fsSL …/scripts/install.sh | sh` (macOS, Linux) and
   `irm …/scripts/install.ps1 | iex` (Windows, no administrator needed).
@@ -101,7 +109,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   (usernames or email addresses; implies `--private`), also for
   `config add-tunnel`. An unknown name stops `mancar` with "no account:
   NAME". The dashboard shows "Private, with budi, ana". Needs the server and
-  the client at the new version.
+  the client at v0.8.0.
 
 ### Upgrading
 - No migration. Update the server first, then the clients.
@@ -319,6 +327,7 @@ First release.
   rate limiting.
 - Built with Go 1.26.11.
 
+[v0.8.0]: https://github.com/tinoimammp/mancar/compare/v0.7.0...v0.8.0
 [v0.7.0]: https://github.com/tinoimammp/mancar/compare/v0.6.0...v0.7.0
 [v0.6.0]: https://github.com/tinoimammp/mancar/compare/v0.5.1...v0.6.0
 [v0.5.1]: https://github.com/tinoimammp/mancar/compare/v0.5.0...v0.5.1
