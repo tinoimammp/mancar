@@ -29,7 +29,7 @@ The dashboard is served at `https://BASE_DOMAIN/dashboard/` (PostgreSQL storage
 only). Accounts have one of two roles:
 
 | Role | Sees and manages |
-|---|---|
+| --- | --- |
 | `admin` | the whole gateway: agents, tunnels, requests, every account, tokens, hostnames, the audit log |
 | `user` | only their own tunnels, subdomains, tokens and requests, and their account |
 
@@ -95,7 +95,7 @@ all time, plus the busiest hostnames on the overview. Counts are kept in
 memory and written every 30 seconds (and on shutdown), in one transaction, to:
 
 | Table | Granularity | Kept |
-|---|---|---|
+| --- | --- | --- |
 | `usage_hourly` | hostname, user, hour | 90 days |
 | `usage_daily` | hostname, user, day (UTC) | forever |
 | `usage_total` | hostname, user | forever |
@@ -109,7 +109,7 @@ The dashboard's **Requests** page lists HTTP requests through the tunnels with
 headers, bodies and responses, and can replay them. Settings in `.env`:
 
 | Variable | Default | |
-|---|---|---|
+| --- | --- | --- |
 | `INSPECT` | `on` | `off` stops recording |
 | `INSPECT_RETENTION` | `24h` | captures older than this are deleted (checked every 5 minutes) |
 | `INSPECT_MAX_BODY_BYTES` | `65536` | bytes of each body kept; a longer request cannot be replayed |
@@ -132,11 +132,11 @@ docker compose exec gateway /mancard token list
 docker compose exec gateway /mancard token revoke <ID>
 ```
 
-* The token is shown **once** and stored only as a SHA-256 hash. Lost token: revoke it and create another.
-* Revocation stops new connections immediately. An agent that is already
+- The token is shown **once** and stored only as a SHA-256 hash. Lost token: revoke it and create another.
+- Revocation stops new connections immediately. An agent that is already
   connected is dropped within 30 seconds (from the dashboard: at once). The
   same goes for `mancard user disable` and `mancard user delete`.
-* Remove a user and everything they own (tokens, hostnames, requests,
+- Remove a user and everything they own (tokens, hostnames, requests,
   statistics); their agents are dropped like above:
 
   ```bash
@@ -175,7 +175,7 @@ Schedule it, for example with `crontab -e`:
 Back up, and keep **off the server**:
 
 | What | Why |
-|---|---|
+| --- | --- |
 | `backups/*.sql.gz` | All users, tokens (hashes) and hostname reservations |
 | `.env` | Contains every secret; without it a restored database is not usable |
 | `caddy_data` volume (optional) | Holds the TLS certificates. They can be re-issued, but Let's Encrypt rate limits apply |
@@ -209,7 +209,7 @@ a Compose stack in this repository's CI.
 `MANCAR_VERSION` in `.env` chooses the gateway and edge images:
 
 | `MANCAR_VERSION` | Runs |
-|---|---|
+| --- | --- |
 | `latest` (default) | the newest release; every `docker compose up -d` checks for a newer one |
 | `0.7.0` | exactly that release |
 | `0.7` | the newest `0.7.x` patch release |
@@ -251,7 +251,7 @@ are off for the same reason.
 ## Limits
 
 | Variable | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `MAX_TUNNELS_PER_AGENT` | 10 | Tunnels one agent connection may register |
 | `MAX_AGENTS_PER_USER` | 10 | Simultaneous agent connections per user |
 | `MAX_CONNECTIONS_PER_TUNNEL` | 256 | Concurrent public connections per tunnel; beyond it clients get `503 tunnel_busy` |
@@ -283,15 +283,15 @@ docker compose exec postgres psql -U mancar -d mancar                           
 
 There is no metrics endpoint yet. Until there is, watch:
 
-* an external uptime probe on `https://<BASE_DOMAIN>/healthz`
-* `docker compose ps` health and container restart counts
-* certificate renewal in `docker compose logs caddy` (Caddy renews about 30 days before expiry and logs failures)
-* free disk (volumes `pgdata`, `caddy_data`, and `backups/`)
+- an external uptime probe on `https://<BASE_DOMAIN>/healthz`
+- `docker compose ps` health and container restart counts
+- certificate renewal in `docker compose logs caddy` (Caddy renews about 30 days before expiry and logs failures)
+- free disk (volumes `pgdata`, `caddy_data`, and `backups/`)
 
 ## Rotating secrets
 
 | Secret | How |
-|---|---|
+| --- | --- |
 | `CLOUDFLARE_API_TOKEN` | Create a new token, update `.env`, `docker compose up -d caddy`, delete the old token in Cloudflare |
 | `POSTGRES_PASSWORD` | `docker compose exec postgres psql -U mancar -c "ALTER USER mancar PASSWORD '<new>'"`, update `.env`, `docker compose up -d pgbouncer gateway` |
 | Agent tokens | Create new, distribute, revoke old (see above) |

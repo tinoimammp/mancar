@@ -9,7 +9,7 @@ environment (see the note) · ❌ not implemented.
 ## Core capabilities
 
 | Capability | State | Notes |
-|---|---|---|
+| --- | --- | --- |
 | HTTP tunnelling | ✅ | Integration tests through the real gateway and agent |
 | HTTPS tunnelling | ⚠️ | TLS is terminated by Caddy. Verified end to end with Caddy's internal CA. **Not verified against real Let's Encrypt and Cloudflare DNS-01** |
 | TCP tunnelling | ✅ | Raw TCP on a configurable public port range |
@@ -35,7 +35,7 @@ environment (see the note) · ❌ not implemented.
 ## Advanced
 
 | | |
-|---|---|
+| --- | --- |
 | UDP tunnelling, OAuth, traffic policies, endpoint management | ❌ |
 | Observability | ⚠️ health endpoints and structured logs; no metrics |
 | Multi-user management | ⚠️ users and tokens via CLI and dashboard; `admin` and `user` roles (users see only their own tunnels, tokens and requests); no public management API |
@@ -45,7 +45,7 @@ environment (see the note) · ❌ not implemented.
 ## Security checklist from the specification
 
 | | |
-|---|---|
+| --- | --- |
 | Agent authentication, token hashing | ✅ |
 | Dashboard authentication, signed sessions, password hashing | ✅ PBKDF2-SHA256, HMAC-signed cookie keyed by `JWT_SECRET`, login rate limit, CSRF protection. API tokens for automation: ❌ |
 | Request size / connection limits | ✅ |
@@ -68,7 +68,7 @@ feature that needs it.
 ## The specification's 15 test scenarios
 
 | # | Scenario | |
-|---|---|---|
+| --- | --- | --- |
 | 1-4 | Local server, tunnel, public URL, request/response forwarding | ✅ |
 | 5 | Random hostname | ✅ |
 | 6-7 | Custom hostname; duplicate rejected | ✅ |
@@ -84,7 +84,7 @@ feature that needs it.
 ## Evidence
 
 | What | Result |
-|---|---|
+| --- | --- |
 | Automated tests | 236 test functions across 14 packages, run with the race detector |
 | Statement coverage | 87.9 % across `internal/...` when all test suites run together |
 | PostgreSQL | Store, migrations, registry contract and token administration tested in CI against PostgreSQL 18, directly and through PgBouncer |

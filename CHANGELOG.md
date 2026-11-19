@@ -8,6 +8,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 ## [v0.8.0] - 2026-11-19
 
 ### Added
+
 - **`--auth USER:PASSWORD`** puts a password in front of an http tunnel for
   people without an account (HTTP Basic Auth, checked by the gateway; the app
   never sees it; after 20 wrong tries from one address within 10 minutes it
@@ -23,6 +24,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 ## [v0.7.0] - 2026-11-18
 
 ### Added
+
 - **PgBouncer** between the gateway and PostgreSQL (transaction pooling;
   `PGBOUNCER_POOL_SIZE`, default 10 server connections). Migrations now take a
   transaction-level lock so they work behind it, and CI runs the database
@@ -30,6 +32,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   directly.
 
 ### Security
+
 - A dashboard replay could reach another account's private tunnel when the
   hostname had changed hands since the capture. A replay now only goes to a
   tunnel of the account that recorded it.
@@ -67,6 +70,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   the deployment, never to anything that came through the edge.
 
 ### Fixed
+
 - `docker-compose.yml` now passes `INSPECT*`, `REGISTER_ENABLED`, `SMTP_URL`,
   `TRUSTED_PROXIES` and the new `MAX_TCP_TUNNELS_PER_USER` to the gateway;
   before, these settings in `.env` were ignored (sign up and password reset
@@ -91,6 +95,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   running gateway still uses; they prepare a new database only.
 
 ### Upgrading
+
 - **Update `docker-compose.yml` first** (`git pull` in the server's mancar
   folder): it adds PgBouncer, passes the missing settings and no longer
   builds images. Then `docker compose pull && docker compose up -d --wait`.
@@ -105,6 +110,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 ## [v0.6.0] - 2026-11-18
 
 ### Added
+
 - `--allow budi,ana@example.com` shares a private tunnel with other accounts
   (usernames or email addresses; implies `--private`), also for
   `config add-tunnel`. An unknown name stops `mancar` with "no account:
@@ -112,11 +118,13 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   the client at v0.8.0.
 
 ### Upgrading
+
 - No migration. Update the server first, then the clients.
 
 ## [v0.5.1] - 2026-11-18
 
 ### Fixed
+
 - `mancar update` no longer fails with "403 Forbidden" on shared networks.
   It reads the latest version from the release's `SHA256SUMS` on github.com
   instead of the GitHub API, which allows only 60 requests an hour per
@@ -125,6 +133,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 ## [v0.5.0] - 2026-11-18
 
 ### Added
+
 - **Private tunnels**: `mancar http 3000 --private` (or `config add-tunnel
   ... --private`). Visitors see a Restricted page with "Log in to continue";
   after logging in, only the account that owns the tunnel gets in, and
@@ -135,10 +144,12 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 - `mancar status` marks private tunnels.
 
 ### Changed
+
 - `mancar config` refuses `--subdomain` and `--private` outside
   `add-tunnel` instead of ignoring them.
 
 ### Upgrading
+
 - No migration. Update the server and the clients; `--private` needs both
   at v0.5.0 (an older client has no such flag, an older server refuses it
   through a new client).
@@ -146,14 +157,17 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 ## [v0.4.0] - 2026-11-18
 
 ### Added
+
 - Accounts with two roles. **Admins** see and manage the whole gateway;
   **users** sign in to see only their own tunnels, subdomains, tokens and
   captured requests, and manage their account (password, delete).
 - Optional sign up from the web, off by default:
+
   ```bash
   REGISTER_ENABLED=true
   SMTP_URL=smtps://user:password@smtp.example.com:465
   ```
+
   New accounts confirm their email before they can create tokens, and get 3
   active tokens and 3 custom subdomains. Unconfirmed sign ups are deleted
   after 7 days. Sign up, "send again" and "forgot password" answer the same
@@ -178,6 +192,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   the role.
 
 ### Changed
+
 - Dashboard admins and users are now one list of accounts. Upgrading moves
   every admin into it; an admin and a user with the same name become one
   admin account that keeps the user's tokens. Open sessions must sign in
@@ -191,6 +206,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 - The logo is now an image, also used as the browser icon.
 
 ### Upgrading
+
 - Take a backup first (`scripts/backup.sh`): migration 0006 moves the
   `admins` table into `users` and drops it.
 - Everyone signed in to the dashboard must sign in again once. Agents
@@ -200,6 +216,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 ## [v0.3.3] - 2026-11-17
 
 ### Changed
+
 - Redesigned dashboard: a floating header with a light / dark switch,
   section tabs with icons, stat cards and cleaner detail sheets.
 - Agents, requests, users, tokens and domains lists are paged, and agents,
@@ -214,8 +231,10 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 ## [v0.3.2] - 2026-11-15
 
 ### Added
+
 - `mancar http PORT` now offers the three subdomains you used most recently
   with that server, so a name does not have to be typed again:
+
   ```text
     1) Random subdomain
     2) Custom subdomain
@@ -224,12 +243,14 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
     3) my-api                   (used 2h ago)
     4) shop                     (used 3 days ago)
   ```
+
   `--last` reuses the most recent one without asking. The history is kept on
   your machine only (`recent-subdomains.json` in the mancar state directory).
 
 ## [v0.3.1] - 2026-11-15
 
 ### Changed
+
 - The client's request log no longer lists every successful static file
   (`.js`, `.css`, images, fonts, media): they are summarised as
   `+ 23 static files (1.2 MB)` per page load. Failed static files are still
@@ -239,6 +260,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 ## [v0.3.0] - 2026-11-15
 
 ### Added
+
 - **Request inspector** in the dashboard (**Requests** page): every HTTP
   request through your tunnels with headers, bodies and the response.
   Requests can be **replayed** to the tunnel or copied as `curl`.
@@ -268,11 +290,13 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   ([docs/NGINX.md](docs/NGINX.md)).
 
 ### Changed
+
 - The README is reorganised into "Run as server" and "Run as client" with a
   feature table.
 - CI no longer runs for documentation-only changes.
 
 ### Upgrading
+
 - Database migrations `0003`–`0005` run automatically when the gateway starts.
   Take a backup first: `scripts/backup.sh`.
 - Install this client version by hand once (older clients have no
@@ -283,6 +307,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 ## [v0.2.0] - 2026-11-15
 
 ### Added
+
 - **Web dashboard** at `https://BASE_DOMAIN/dashboard/`: connected agents and
   their tunnels (with disconnect), users, agent tokens (create, revoke with
   immediate disconnect) and hostname reservations.
@@ -294,16 +319,19 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
   Content-Security-Policy.
 
 ### Changed
+
 - PostgreSQL 16 → **18**. The data volume is now mounted at
   `/var/lib/postgresql`.
 - Caddy 2.10.2 → 2.11.9; gateway base image distroless Debian 12 → 13.
 - GitHub Actions updated to current major versions.
 
 ### Fixed
+
 - When the local service was down, visitors sometimes received
   `tunnel_unreachable` instead of `local_service_unreachable`.
 
 ### Upgrading
+
 - **PostgreSQL 18 cannot read a PostgreSQL 16 data directory.** If you ran
   v0.1.0 with data you want to keep: `scripts/backup.sh` on v0.1.0, upgrade,
   then `scripts/restore.sh`. Fresh installs need nothing.
@@ -313,6 +341,7 @@ Each release publishes the `mancar` client for Linux, macOS and Windows, the
 First release.
 
 ### Added
+
 - HTTP/HTTPS tunnels (including WebSocket and streaming) and raw TCP tunnels.
 - Custom (`--subdomain`) and random subdomains, reserved atomically and kept
   for their owner across reconnects.

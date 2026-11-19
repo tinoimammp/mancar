@@ -6,7 +6,7 @@ the Compose plugin is installed.
 ## 1. What you need
 
 | Item | Notes |
-|---|---|
+| --- | --- |
 | VPS with public IPv4 | 1 vCPU / 1 GB RAM is enough to start |
 | Domain on Cloudflare | Free plan is fine; the DNS-01 workflow needs no paid feature |
 | Open ports | `80/tcp`, `443/tcp`, `443/udp`, and the TCP tunnel range (default `20000-20099/tcp`) |
@@ -42,10 +42,22 @@ required.
 
 ## 3. Cloudflare API token
 
-Create a token at *My Profile → API Tokens → Create Token → Custom token*:
+Cloudflare's own guide:
+[Create API token](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/).
 
-* Permissions: **Zone → DNS → Edit**, and **Zone → Zone → Read**
-* Zone resources: **Include → Specific zone →** your domain only
+1. Open [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens)
+   and click **Create Token**, then **Custom token → Get started**.
+2. **Permissions**, two rows:
+   * **Zone → DNS → Edit**
+   * **Zone → Zone → Read**
+3. **Zone Resources:** **Include → Specific zone →** your domain only.
+4. **Continue to summary → Create Token**, and copy the token (it is shown
+   once).
+5. Put it in `.env`:
+
+   ```bash
+   CLOUDFLARE_API_TOKEN=paste-the-token-here
+   ```
 
 Never use the Global API Key. The token is used only to publish and remove the
 `_acme-challenge` TXT records. The Caddy DNS plugin documents the two
@@ -139,7 +151,7 @@ new gateway starts. Agents reconnect on their own and keep their hostnames.
 ## Troubleshooting
 
 | Symptom | Likely cause and fix |
-|---|---|
+| --- | --- |
 | `docker compose up` stops with *"X is required"* | `.env` is incomplete; the message names the variable |
 | Caddy keeps logging `obtain` errors | Wrong or under-scoped Cloudflare token; the zone is not the one of `BASE_DOMAIN`; or DNS records missing |
 | `too many certificates` / `rate limit` | You hit Let's Encrypt limits. Use the staging CA while testing; wait for the window to pass |

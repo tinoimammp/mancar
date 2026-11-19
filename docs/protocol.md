@@ -21,7 +21,7 @@ X-Mancar-Features: events            optional features the agent supports
 ```
 
 | Status | Meaning | Agent behaviour |
-|---|---|---|
+| --- | --- | --- |
 | `101 Switching Protocols` with `Upgrade: mancar/1` | Accepted | Proceed |
 | `426` | The request was not a valid upgrade | Fatal |
 | `401` | Token missing, malformed, unknown or revoked | Fatal (not retried) |
@@ -52,7 +52,7 @@ correlated by `req_id`. Unknown fields are ignored (forward compatibility).
 ```
 
 | `type` | Direction | Payload |
-|---|---|---|
+| --- | --- | --- |
 | `register` | agent → gateway | `proto` = `http` or `tcp`; `subdomain` optional (HTTP only, empty = random); `private` optional (HTTP only); `allow` optional (usernames or emails, needs `private`); `auth` optional (`{"user","password"}`, HTTP only, not with `private`) |
 | `registered` | gateway → agent | `tunnel_id`, `proto`, `hostname` (HTTP), `port` (TCP), `public_url`, `private`, `allow` (usernames), `auth` |
 | `unregister` | agent → gateway | `tunnel_id`; only the session's own tunnels |
@@ -133,7 +133,7 @@ versions keep working.
 ## 5. Limits
 
 | What | Limit |
-|---|---|
+| --- | --- |
 | Control message / stream header | 64 KiB / 4 KiB |
 | Tunnels per session | `MAX_TUNNELS_PER_AGENT` (10) |
 | Sessions per user | `MAX_AGENTS_PER_USER` (10) |

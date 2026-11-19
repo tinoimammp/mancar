@@ -141,7 +141,7 @@ The gateway image is distroless (no shell, no package manager) and runs as an un
 ## Known gaps
 
 | Gap | Consequence |
-|---|---|
+| --- | --- |
 | No IP filtering or rate limiting per tunnel (access control: `--private`, `--allow`, `--auth`) | Anyone with the URL of a public tunnel reaches your service. TCP tunnels are open public ports |
 | No alerting | The Activity page records account changes, but nothing notifies you |
 | Access to a private tunnel is checked against an in-memory revocation list | Disabling or deleting an account in the dashboard, or a new password, ends its tunnel access at once; the same done with the `mancard` CLI (another process) is caught only when the cookie expires (12 h). After a gateway restart the list is empty, so a cookie of a disabled account may work until it expires |
@@ -157,14 +157,14 @@ The gateway image is distroless (no shell, no package manager) and runs as an un
 
 ## Operator checklist
 
-- [ ] DNS records are **DNS only**; Cloudflare token limited to the one zone and to DNS edit (plus zone read)
-- [ ] `.env` is `chmod 600`, backed up off the server, never committed
-- [ ] Firewall allows only 80, 443 (tcp+udp) and the TCP range; remember Docker bypasses `ufw`
-- [ ] Narrow `TCP_PORT_MIN`/`MAX` to what you need
-- [ ] Pin `MANCAR_VERSION` to a release; keep the host and Docker updated
-- [ ] Scheduled `scripts/backup.sh`, and a restore tested at least once
-- [ ] One token per person and device; revoke on departure (live agents are dropped within 30 seconds)
-- [ ] Nothing sensitive behind a tunnel unless it authenticates itself
+* [ ] DNS records are **DNS only**; Cloudflare token limited to the one zone and to DNS edit (plus zone read)
+* [ ] `.env` is `chmod 600`, backed up off the server, never committed
+* [ ] Firewall allows only 80, 443 (tcp+udp) and the TCP range; remember Docker bypasses `ufw`
+* [ ] Narrow `TCP_PORT_MIN`/`MAX` to what you need
+* [ ] Pin `MANCAR_VERSION` to a release; keep the host and Docker updated
+* [ ] Scheduled `scripts/backup.sh`, and a restore tested at least once
+* [ ] One token per person and device; revoke on departure (live agents are dropped within 30 seconds)
+* [ ] Nothing sensitive behind a tunnel unless it authenticates itself
 
 ## Reporting a vulnerability
 
