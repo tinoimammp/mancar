@@ -4,10 +4,12 @@ This document says what mancar protects, how, and, just as important, what
 it does **not** protect. It describes the code as it is, not as it might become.
 
 > **The most important thing to know:** a tunnel makes your local service
-> reachable by **anyone who knows or guesses its URL or port**. There are no
-> authentication policies (basic auth, OAuth, IP allow-lists) yet. Do not expose
-> an admin panel, a database or anything sensitive through a tunnel unless that
-> service protects itself. A TCP tunnel is a raw public port with no protection at all.
+> reachable by **anyone who knows or guesses its URL or port**, unless you
+> start it with `--private`/`--allow` (dashboard accounts only) or `--auth`
+> (a shared password); see below. There are no OAuth or IP allow-lists. Do not
+> expose an admin panel, a database or anything sensitive through a public
+> tunnel unless that service protects itself. A TCP tunnel is a raw public port
+> with no protection at all.
 
 No independent security audit has been performed. The review behind this
 document was done by the authors of the code; treat it accordingly.
@@ -62,10 +64,13 @@ passwords, cookies, tokens. They are therefore:
   row ID as associated data (a ciphertext cannot be moved to another row).
   Method, URL, headers, bodies and client address are all inside the
   ciphertext; hostname, status, timing and sizes are stored in the clear;
-* decrypted only in the gateway, for a logged-in admin;
+* decrypted only in the gateway, for a signed-in dashboard account;
 * deleted automatically after `INSPECT_RETENTION` (default 24 h) and beyond
   `INSPECT_MAX_ROWS`, and when their user is deleted;
-* visible to every dashboard admin (there are no per-user views yet).
+* visible to the user whose tunnel recorded them, and to every admin. A replay
+  goes only to a tunnel of the account that recorded it, and skips the
+  `--private` and `--auth` checks there (the owner replays into their own
+  tunnel).
 
 Set `INSPECT=off` if admins must not see tunnel traffic. A database dump
 without `ENCRYPTION_KEY` does not reveal captured content.
@@ -87,6 +92,16 @@ A tunnel started with `--private` is only forwarded for its owner, and for the a
 * The gateway removes that cookie from every request it forwards, so the app never sees it. Refused requests never reach the agent, the request inspector or the traffic counters.
 * Requests that are not page loads by a browser (API calls, `POST`, WebSocket upgrades) get `401` instead of a redirect.
 * Signing out of the dashboard does not end access that was already granted; it expires after 12 hours. Disabling the account or revoking the token disconnects the agent, which ends the tunnel itself.
+
+## Tunnels behind a password
+
+`--auth USER:PASSWORD` puts HTTP Basic Auth in front of an HTTP tunnel.
+
+* The agent sends the credentials once, over its TLS connection, when it registers the tunnel. The gateway keeps only a SHA-256 of `user:password` in memory, for as long as the tunnel lives; nothing is written to the database.
+* The router compares in constant time and answers `401` with `WWW-Authenticate` until they match. Refused requests never reach the agent, the inspector or the counters. The `Authorization` header is removed before forwarding, so neither the app nor the request inspector sees the password.
+* 20 wrong passwords per tunnel and client address (an IPv6 /64 counts as one) within 10 minutes lead to `429` until the window ends. A password must have at least 8 characters; it is shared by everyone who knows it, so change it (restart the tunnel) when people should lose access.
+* An agent that asked for a password but is not told the gateway applied it (an older gateway) stops instead of serving the tunnel without it.
+* `mancar config add-tunnel --auth USER:PASSWORD` saves the password in plain text in `config.json` (mode `0600`, like the token); `mancar config` shows it as `USER:***`. That holds when the password came from `MANCAR_AUTH_PASSWORD` too; to keep it out of every file, start the tunnel with `mancar http PORT --auth USER` instead of saving it.
 
 ## Preventing open-proxy behaviour
 
@@ -127,7 +142,7 @@ The gateway image is distroless (no shell, no package manager) and runs as an un
 
 | Gap | Consequence |
 |---|---|
-| No password, IP filtering or rate limiting per tunnel (only `--private` / `--allow`) | Anyone with the URL of a public tunnel reaches your service. TCP tunnels are open public ports |
+| No IP filtering or rate limiting per tunnel (access control: `--private`, `--allow`, `--auth`) | Anyone with the URL of a public tunnel reaches your service. TCP tunnels are open public ports |
 | No alerting | The Activity page records account changes, but nothing notifies you |
 | Access to a private tunnel is checked against an in-memory revocation list | Disabling or deleting an account in the dashboard, or a new password, ends its tunnel access at once; the same done with the `mancard` CLI (another process) is caught only when the cookie expires (12 h). After a gateway restart the list is empty, so a cookie of a disabled account may work until it expires |
 | Limits and the failed-login limiter are in memory, per process | Not shared across several gateways; a restart resets them |
@@ -148,7 +163,7 @@ The gateway image is distroless (no shell, no package manager) and runs as an un
 - [ ] Narrow `TCP_PORT_MIN`/`MAX` to what you need
 - [ ] Pin `MANCAR_VERSION` to a release; keep the host and Docker updated
 - [ ] Scheduled `scripts/backup.sh`, and a restore tested at least once
-- [ ] One token per person and device; revoke on departure; restart the gateway to cut live sessions
+- [ ] One token per person and device; revoke on departure (live agents are dropped within 30 seconds)
 - [ ] Nothing sensitive behind a tunnel unless it authenticates itself
 
 ## Reporting a vulnerability

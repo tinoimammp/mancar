@@ -132,7 +132,7 @@ docker compose up -d --wait          # swap the containers (tunnels pause ±15-4
 The server never compiles anything: it runs the released images. Wait until the
 release on GitHub is finished (its images are published) before upgrading. In
 production pin a version in `.env`, written **without** a `v`
-(`MANCAR_VERSION=0.6.1`, the image tag); a tag that does not exist makes `pull`
+(`MANCAR_VERSION=0.7.0`, the image tag); a tag that does not exist makes `pull`
 fail and leaves the running gateway untouched. Database migrations run when the
 new gateway starts. Agents reconnect on their own and keep their hostnames.
 

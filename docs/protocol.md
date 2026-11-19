@@ -53,8 +53,8 @@ correlated by `req_id`. Unknown fields are ignored (forward compatibility).
 
 | `type` | Direction | Payload |
 |---|---|---|
-| `register` | agent → gateway | `proto` = `http` or `tcp`; `subdomain` optional (HTTP only, empty = random); `private` optional (HTTP only); `allow` optional (usernames or emails, needs `private`) |
-| `registered` | gateway → agent | `tunnel_id`, `proto`, `hostname` (HTTP), `port` (TCP), `public_url`, `private`, `allow` (usernames) |
+| `register` | agent → gateway | `proto` = `http` or `tcp`; `subdomain` optional (HTTP only, empty = random); `private` optional (HTTP only); `allow` optional (usernames or emails, needs `private`); `auth` optional (`{"user","password"}`, HTTP only, not with `private`) |
+| `registered` | gateway → agent | `tunnel_id`, `proto`, `hostname` (HTTP), `port` (TCP), `public_url`, `private`, `allow` (usernames), `auth` |
 | `unregister` | agent → gateway | `tunnel_id`; only the session's own tunnels |
 | `ok` | gateway → agent | acknowledgement |
 | `error` | gateway → agent | `{"code": ..., "message": ...}` |
@@ -69,7 +69,17 @@ answers `unsupported`; an older gateway ignores the field, so the agent checks
 serve the tunnel publicly. `allow` shares a private tunnel with other
 accounts; an unknown name is refused with `bad_request` ("no account: NAME"),
 and an agent that asked for `allow` but gets none back stops, so nobody is
-silently left out.
+silently left out. At most 20 accounts per tunnel.
+
+`auth` puts HTTP Basic Auth in front of the tunnel (see
+[SECURITY.md](SECURITY.md#tunnels-behind-a-password)): the user name is 1-64
+characters without `:`, the password at least 8 characters, otherwise
+`bad_request`. The gateway keeps only a hash and answers `registered.auth:
+true`; an agent that asked for `auth` and does not get it back stops instead of
+serving the tunnel without a password.
+
+An agent may send at most 120 control messages per 10 seconds; beyond that the
+gateway answers `limit_exceeded` and closes the session.
 
 Subdomain rules: 3-63 characters of `a-z`, `0-9`, `-`; must start and end with a
 letter or digit; no `--` (which also excludes punycode); a list of reserved names

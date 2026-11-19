@@ -23,8 +23,9 @@ environment (see the note) · ❌ not implemented.
 | Persistent connections, reconnect | ✅ | Backoff 1 s → 30 s with jitter; a gateway restart is survived in about 2.5 s; random names survive reconnects |
 | Traffic inspection, request replay | ✅ | Dashboard **Requests** page: headers, bodies (first 64 KiB), responses, replay, copy as curl. Stored AES-256-GCM encrypted in PostgreSQL, deleted after `INSPECT_RETENTION`. HTTP only, not WebSocket frames or TCP |
 | Private tunnels (owner signs in through the dashboard) | ✅ | `--private`; HTTP only, needs PostgreSQL |
-| Basic auth, IP allow/deny in front of a tunnel | ❌ | |
-| Rate limiting | ⚠️ | Only failed agent logins per client address. No per-tunnel or per-IP limit on public traffic |
+| Password in front of a tunnel (HTTP Basic Auth) | ✅ | `--auth USER:PASSWORD`, checked by the gateway |
+| IP allow/deny in front of a tunnel | ❌ | |
+| Rate limiting | ⚠️ | Failed agent logins, dashboard logins and `--auth` passwords, per client address. No limit on public traffic itself |
 | Request size and connection limits | ✅ | |
 | Management REST API (OpenAPI) | ❌ | Only `/healthz` and `/api/v1/system/health`. Tokens are managed with `mancard token ...` |
 | Web dashboard | ✅ | `/dashboard/`: live agents and tunnels, disconnect, users, tokens (create, revoke with immediate disconnect), hostname reservations. Needs PostgreSQL storage |
@@ -37,7 +38,7 @@ environment (see the note) · ❌ not implemented.
 |---|---|
 | UDP tunnelling, OAuth, traffic policies, endpoint management | ❌ |
 | Observability | ⚠️ health endpoints and structured logs; no metrics |
-| Multi-user management | ⚠️ users and tokens via CLI and dashboard; dashboard admins are all equal (no roles); no public management API |
+| Multi-user management | ⚠️ users and tokens via CLI and dashboard; `admin` and `user` roles (users see only their own tunnels, tokens and requests); no public management API |
 | High availability, horizontal scaling | ❌ single gateway node; hostname and port allocation assume one node (the data model is already in PostgreSQL) |
 | Redis | ❌ not needed yet |
 
@@ -55,12 +56,14 @@ Details and gaps: [SECURITY.md](SECURITY.md).
 
 ## Database
 
-Implemented: `users`, `agent_tokens`, `domains`, `admins`, `captured_requests`, `usage_hourly`, `usage_daily`, `usage_total` (UUID keys, foreign keys with
-cascade, unique constraints, check constraints, indexes, versioned atomic
-migrations, advisory-locked so parallel starts are safe).
+Implemented: `users` (with roles and dashboard passwords), `agent_tokens`,
+`email_tokens`, `domains`, `captured_requests`, `usage_hourly`, `usage_daily`,
+`usage_total`, `audit_log` (UUID keys, foreign keys with cascade, unique
+constraints, check constraints, indexes, versioned atomic migrations,
+advisory-locked so parallel starts are safe, also behind PgBouncer).
 Not yet: `agents`, `tunnels` (history), `certificates`, `api_keys`,
-`traffic_logs`, `auth_policies`, `audit_logs`, `system_settings`; each arrives
-with the feature that needs it.
+`traffic_logs`, `auth_policies`, `system_settings`; each arrives with the
+feature that needs it.
 
 ## The specification's 15 test scenarios
 
@@ -75,7 +78,7 @@ with the feature that needs it.
 | 11 | TCP | ✅ |
 | 12 | Authentication | ✅ |
 | 13 | Cross-user isolation | ✅ |
-| 14 | Rate limiting | ⚠️ failed logins only |
+| 14 | Rate limiting | ⚠️ failed logins and passwords only |
 | 15 | Graceful shutdown | ✅ |
 
 ## Evidence
@@ -84,7 +87,7 @@ with the feature that needs it.
 |---|---|
 | Automated tests | 236 test functions across 14 packages, run with the race detector |
 | Statement coverage | 87.9 % across `internal/...` when all test suites run together |
-| PostgreSQL | Store, migrations, registry contract and token administration tested against PostgreSQL 16 |
+| PostgreSQL | Store, migrations, registry contract and token administration tested in CI against PostgreSQL 18, directly and through PgBouncer |
 | Edge end-to-end | `scripts/e2e-edge.sh`: real Caddy 2.11.9 with the production Caddyfile → real gateway → real agent → local app. Checks the upgrade handshake over HTTPS, wildcard and apex certificates, forwarded headers and spoofing, streaming, redirect, shutdown, wrong token, brute-force protection. Passed repeatedly |
 | Scripts | `setup.sh`, `backup.sh`, `restore.sh`, `rename-module.sh` exercised for real (destroy-and-restore on PostgreSQL included); `shellcheck` clean |
 | Compose file | Rendered and validated with Docker Compose v2.29.7: required-variable errors, published ports, hardening options |
@@ -98,16 +101,14 @@ with the feature that needs it.
 * **No load or performance testing.** Only functional concurrency tests exist (many concurrent requests, large bodies). Do not assume capacity numbers.
 * **No independent security audit** and no penetration test.
 * The macOS and Windows clients were cross-compiled but never run.
-* The placeholder module path `github.com/tinoimammp/mancar`, the image names `ghcr.io/tinoimammp/...` and the MIT licence holder `USERNAME` must be replaced (`scripts/rename-module.sh`).
 
 ## Roadmap
 
 Ordered by what makes the gateway safer to expose, then by what users ask for:
 
 1. Run the full stack in CI and fix what that finds; run a real certificate issuance once
-2. Per-tunnel auth (basic auth), IP allow/deny and rate limits
-3. Management REST API with OpenAPI, then the dashboard
-4. Traffic inspector and replay
-5. Metrics endpoint
-6. Custom domains, TLS (SNI) tunnels
-7. UDP, OAuth, multi-node operation
+2. IP allow/deny and rate limits on public traffic
+3. Management REST API with OpenAPI
+4. Metrics endpoint
+5. Custom domains, TLS (SNI) tunnels
+6. UDP, OAuth, multi-node operation

@@ -50,7 +50,8 @@ There are two programs:
 | | Dashboard: hashed passwords, signed cookies, CSRF protection, strict CSP | ✅ |
 | | Private tunnels: only the owner opens them, after signing in (`--private`) | ✅ |
 | | Share a private tunnel with other accounts (`--allow budi,ana`) | ✅ |
-| | Basic auth / IP rules in front of a tunnel | ❌ |
+| | A password in front of a tunnel, for people without an account (`--auth`) | ✅ |
+| | IP rules in front of a tunnel | ❌ |
 
 ✅ available · ❌ not yet. Details: [docs/STATUS.md](docs/STATUS.md).
 
@@ -89,7 +90,7 @@ nano .env              # set BASE_DOMAIN, ACME_EMAIL, CLOUDFLARE_API_TOKEN
 ```
 
 `MANCAR_VERSION` picks the release: `latest` (the default) always runs the
-newest one, or pin a version such as `0.3.0`.
+newest one, or pin a version such as `0.7.0`.
 
 ### 3. Start
 
@@ -131,7 +132,7 @@ docker compose exec gateway /mancard token create --user alice --name laptop
 docker compose pull && docker compose up -d --wait   # download first, then swap (tunnels pause briefly)
 ```
 
-To run a specific version, set `MANCAR_VERSION=0.3.0` in `.env` and run the
+To run a specific version, set `MANCAR_VERSION=0.7.0` in `.env` and run the
 same command. Take a backup first (`scripts/backup.sh`).
 
 More: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) (troubleshooting) and
@@ -150,6 +151,9 @@ macOS / Linux:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tinoimammp/mancar/main/scripts/install.sh | sh
 ```
+
+It installs to `/usr/local/bin` (asking for sudo when needed); to install
+without sudo, pipe it to `MANCAR_INSTALL_DIR=$HOME/.local/bin sh` instead.
 
 Windows (PowerShell):
 
@@ -190,6 +194,7 @@ mancar http 3000 --last               # reuse the name you used most recently
 mancar tcp 5432                       # raw TCP, e.g. a database -> YOUR_DOMAIN:200xx
 mancar http 3000 --private            # only you can open it (see below)
 mancar http 3000 --allow budi,ana     # private, and budi and ana may open it too
+mancar http 3000 --auth klien:rahasia123   # anyone with this user name and password
 ```
 
 **Private tunnels.** With `--private`, a visitor sees a **Restricted** page
@@ -197,10 +202,20 @@ with a **Log in to continue** button. After logging in on the dashboard, the
 account that owns the tunnel is sent on to it; anyone else lands on the
 Restricted page again. `--allow` shares it with other accounts on the server
 (usernames or email addresses, comma separated; it implies `--private`). An
-unknown name stops `mancar` with "no account: NAME". Access lasts 12 hours per browser and tunnel. Good for
-admin panels and work in progress. It works for HTTP tunnels on servers with
-the dashboard (PostgreSQL). Requests without a browser (curl, webhooks) get
-`401`, so use a normal tunnel for those.
+unknown name stops `mancar` with "no account: NAME". Access lasts 12 hours per
+browser and tunnel. Good for admin panels and work in progress. It works for
+HTTP tunnels on servers with the dashboard (PostgreSQL). Requests without a
+browser (curl, webhooks) get `401`, so use a normal tunnel for those.
+
+**Password.** `--auth USER:PASSWORD` is for people without an account, such as
+a client looking at a demo: the browser asks for the user name and password
+(`curl -u USER:PASSWORD` from scripts). The gateway checks it and never passes
+it to your app; 20 wrong tries from one address within 10 minutes block it until
+that window ends. The
+password needs at least 8 characters. To keep it out of your shell history,
+give only `--auth USER` and put the password in `MANCAR_AUTH_PASSWORD`. A tunnel
+is either private or behind a password, not both; apps that use the
+`Authorization` header themselves (bearer tokens) should use `--private`.
 
 While it runs, requests are printed. Successful static files (`.js`, `.css`,
 images, fonts) are folded into one line per page load, so the requests that
@@ -229,6 +244,12 @@ mancar start      # start all saved tunnels
 mancar status     # what is running
 mancar stop       # stop everything
 ```
+
+A saved `--auth` keeps its password in the config file (readable only by you).
+
+`MANCAR_SERVER` and `MANCAR_TOKEN` override the config file;
+`MANCAR_NO_UPDATE_CHECK=1` stops looking for new releases. `mancar help` lists
+everything.
 
 ---
 

@@ -136,14 +136,12 @@ docker compose exec gateway /mancard token revoke <ID>
 * Revocation stops new connections immediately. An agent that is already
   connected is dropped within 30 seconds (from the dashboard: at once). The
   same goes for `mancard user disable` and `mancard user delete`.
-* Remove a user and everything they own (tokens, hostnames):
+* Remove a user and everything they own (tokens, hostnames, requests,
+  statistics); their agents are dropped like above:
 
   ```bash
-  docker compose exec postgres psql -U mancar -d mancar \
-    -c "DELETE FROM users WHERE username = 'alice'"
+  docker compose exec gateway /mancard user delete alice
   ```
-
-  then restart the gateway to drop their live sessions.
 
 ## Hostnames
 
@@ -213,8 +211,8 @@ a Compose stack in this repository's CI.
 | `MANCAR_VERSION` | Runs |
 |---|---|
 | `latest` (default) | the newest release; every `docker compose up -d` checks for a newer one |
-| `0.3.0` | exactly that release |
-| `0.3` | the newest `0.3.x` patch release |
+| `0.7.0` | exactly that release |
+| `0.7` | the newest `0.7.x` patch release |
 
 ```bash
 scripts/backup.sh
@@ -227,7 +225,7 @@ every agent connection); agents reconnect by themselves. Nothing is built on the
 server: a version that was not published (a typo, a `v` prefix, a release still
 running) makes `pull` fail and changes nothing.
 
-To move to a specific version, set `MANCAR_VERSION=0.3.0` and run the same
+To move to a specific version, set `MANCAR_VERSION=0.7.0` and run the same
 command; to go back, set the previous version (and see below). Behind nginx,
 add `-f docker-compose.yml -f docker-compose.nginx.yml` as usual.
 `MANCAR_PULL_POLICY=missing` stops `up` from contacting the registry when the
@@ -295,9 +293,9 @@ There is no metrics endpoint yet. Until there is, watch:
 | Secret | How |
 |---|---|
 | `CLOUDFLARE_API_TOKEN` | Create a new token, update `.env`, `docker compose up -d caddy`, delete the old token in Cloudflare |
-| `POSTGRES_PASSWORD` | `docker compose exec postgres psql -U mancar -c "ALTER USER mancar PASSWORD '<new>'"`, update `.env`, `docker compose up -d gateway` |
+| `POSTGRES_PASSWORD` | `docker compose exec postgres psql -U mancar -c "ALTER USER mancar PASSWORD '<new>'"`, update `.env`, `docker compose up -d pgbouncer gateway` |
 | Agent tokens | Create new, distribute, revoke old (see above) |
-| `JWT_SECRET` | Signs dashboard sessions. Changing it and restarting the gateway signs every admin out; nothing else is affected |
+| `JWT_SECRET` | Signs dashboard sessions and keys private-tunnel access. Changing it and restarting the gateway signs everyone out of the dashboard and ends every granted `--private`/`--allow` access (people sign in again); nothing else is affected |
 | `ENCRYPTION_KEY` | Encrypts captured requests. Changing it makes existing captures unreadable (the dashboard hides them; they expire with `INSPECT_RETENTION`). Nothing else uses it |
 
 ## Moving to a new server
